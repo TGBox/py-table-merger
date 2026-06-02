@@ -3,6 +3,7 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
+import constants
 
 class Tooltip:
     def __init__(self, widget: tk.Widget, text_func):
@@ -24,7 +25,7 @@ class Tooltip:
         
         label = tk.Label(
             tw, text=self.text_func(), justify=tk.LEFT, background="#F2FFE0",
-            relief=tk.SOLID, borderwidth=1, font=("Arial", "9", "normal"), padx=5, pady=3
+            relief=tk.SOLID, borderwidth=1, font=("Roboto", "9", "normal"), padx=5, pady=3
         )
         label.pack()
 
@@ -60,14 +61,12 @@ class TableMergerApp:
         self.root = root
         self.root.title("Datenbank Export Merger")
         # Calculating the offset to center the window in the primary screen.
-        window_width = 1200
-        window_height = 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x = (screen_width // 2) - (window_width // 2)
-        y = (screen_height // 2) - (window_height // 2)
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-        self.root.minsize(800, 600)
+        x = (screen_width // 2) - (constants.DEFAULT_WINDOW_WIDTH // 2)
+        y = (screen_height // 2) - (constants.DEFAULT_WINDOW_HEIGHT // 2)
+        self.root.geometry(f"{constants.DEFAULT_WINDOW_WIDTH}x{constants.DEFAULT_WINDOW_HEIGHT}+{x}+{y}")
+        self.root.minsize(constants.MIN_WINDOW_WIDTH, constants.MIN_WINDOW_HEIGHT)
         
 
         self.df_left = None
@@ -78,22 +77,42 @@ class TableMergerApp:
         self.key_right = None
 
         # --- 1. DATEI-AUSWAHL ---
-        self.frame_files = tk.LabelFrame(root, text="1. Tabellen auswählen", font=("Arial", 10, "bold"))
+        self.frame_files = tk.LabelFrame(root, text="1. Tabellen auswählen", font=("Roboto", 10, "bold"))
         self.frame_files.pack(fill="x", padx=15, pady=10)
         self.frame_files.columnconfigure(1, weight=1)
 
-        self.btn_load_left = tk.Button(self.frame_files, text="Tabelle Links wählen", command=self.load_left, width=20)
+        self.btn_load_left = tk.Button(
+            self.frame_files,
+            text="Tabelle Links wählen",
+            command=self.load_left,
+            width=20,
+            bg="#5E5E5E",
+            fg="#cccccc",
+            activebackground="#444444",
+            activeforeground="#ffffff",
+            font=("Roboto", 11, "bold")
+        )
         self.btn_load_left.grid(row=0, column=0, padx=10, pady=8, sticky="ew")
         self.lbl_left_name = tk.Label(self.frame_files, text="Keine Datei ausgewählt", fg="gray", anchor="w")
         self.lbl_left_name.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
 
-        self.btn_load_right = tk.Button(self.frame_files, text="Tabelle Rechts wählen", command=self.load_right, width=20)
-        self.btn_load_right.grid(row=1, column=0, padx=10, pady=8, sticky="ew")
+        self.btn_load_right = tk.Button(
+            self.frame_files,
+            text="Tabelle Rechts wählen",
+            command=self.load_right,
+            width=20,
+            bg="#5E5E5E",
+            fg="#cccccc",
+            activebackground="#444444",
+            activeforeground="#ffffff",
+            font=("Roboto", 11, "bold")
+        )
+        self.btn_load_right.grid(row=0, column=3, padx=10, pady=8, sticky="ew")
         self.lbl_right_name = tk.Label(self.frame_files, text="Keine Datei ausgewählt", fg="gray", anchor="w")
-        self.lbl_right_name.grid(row=1, column=1, padx=10, pady=8, sticky="ew")
+        self.lbl_right_name.grid(row=0, column=2, padx=10, pady=8, sticky="ew")
 
         # --- 2. SPALTEN-AUSWAHL ---
-        self.frame_columns = tk.LabelFrame(root, text="2. Spalten wählen (Rechtsklick = Schlüssel | Linksklick = Export-Spalten)", font=("Arial", 10, "bold"))
+        self.frame_columns = tk.LabelFrame(root, text="2. Spalten wählen (Rechtsklick = Schlüssel | Linksklick = Export-Spalten)", font=("Roboto", 10, "bold"))
         self.frame_columns.pack(fill="both", expand=True, padx=15, pady=10)
 
         self.frame_columns.columnconfigure(0, weight=3)
@@ -102,21 +121,21 @@ class TableMergerApp:
         self.frame_columns.rowconfigure(1, weight=1)
 
         # Linke Tabelle
-        tk.Label(self.frame_columns, text="Spalten (Links):", font=("Arial", 9, "italic")).grid(row=0, column=0, padx=10, pady=(5, 2), sticky="w")
+        tk.Label(self.frame_columns, text="Spalten (Links):", font=("Roboto", 9, "italic")).grid(row=0, column=0, padx=10, pady=(5, 2), sticky="w")
         self.listbox_left = tk.Listbox(self.frame_columns, exportselection=False, selectmode=tk.MULTIPLE)
         self.listbox_left.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
         self.listbox_left.bind("<Button-3>", self.set_key_left) # Rechtsklick Event
         self.listbox_left.bind("<<ListboxSelect>>", self.update_export_list) # Event bei Auswahl-Änderung
 
         # Rechte Tabelle
-        tk.Label(self.frame_columns, text="Spalten (Rechts):", font=("Arial", 9, "italic")).grid(row=0, column=1, padx=10, pady=(5, 2), sticky="w")
+        tk.Label(self.frame_columns, text="Spalten (Rechts):", font=("Roboto", 9, "italic")).grid(row=0, column=1, padx=10, pady=(5, 2), sticky="w")
         self.listbox_right = tk.Listbox(self.frame_columns, exportselection=False, selectmode=tk.MULTIPLE)
         self.listbox_right.grid(row=1, column=1, padx=10, pady=5, sticky="nsew")
         self.listbox_right.bind("<Button-3>", self.set_key_right) # Rechtsklick Event
         self.listbox_right.bind("<<ListboxSelect>>", self.update_export_list) # Event bei Auswahl-Änderung
         
         # Drag and Drop Sortierbereich
-        tk.Label(self.frame_columns, text="Finale Export-Reihenfolge (Ziehen zum Sortieren):", font=("Arial", 9, "bold"), fg="#2E7D32").grid(row=0, column=2, padx=10, pady=(5, 2), sticky="w")
+        tk.Label(self.frame_columns, text="Finale Export-Reihenfolge (Ziehen zum Sortieren):", font=("Roboto", 9, "bold"), fg=constants.EXPORT_FG_COL).grid(row=0, column=2, padx=10, pady=(5, 2), sticky="w")
         self.listbox_export = DragDropListbox(self.frame_columns, background="#F0FBF0", selectbackground="#B8D6D8")
         self.listbox_export.grid(row=1, column=2, padx=10, pady=5, sticky="nsew")
 
@@ -129,13 +148,14 @@ class TableMergerApp:
         self.dropdown_join = tk.OptionMenu(self.frame_options, self.join_type, "left", "right", "inner", "outer")
         self.dropdown_join.pack(side="left", padx=5)
 
-        self.lbl_join_info = tk.Label(self.frame_options, text="", fg="gray", font=("Arial", 9, "italic"))
+        self.lbl_join_info = tk.Label(self.frame_options, text="", fg="gray", font=("Roboto", 9, "italic"))
         self.lbl_join_info.pack(side="left", padx=10)
         self.join_type.trace_add("write", self.update_join_info)
 
         self.btn_merge = tk.Button(
             root, text="Ausgewählte Spalten zusammenführen & speichern",
-            bg="#2C4D2D", fg="white", font=("Arial", 11, "bold"),
+            bg=constants.CONFIRM_BTN_BG_COL, fg="white", font=("Roboto", 11, "bold"),
+            activebackground=constants.CONFIRM_BTN_ACTIVE_BG_COL, activeforeground=constants.CONFIRM_BTN_ACTIVE_FG_COL,
             command=self.perform_merge, relief="raised", pady=8
         )
         self.btn_merge.pack(fill="x", padx=15, pady=15)
@@ -200,21 +220,21 @@ class TableMergerApp:
         if index >= 0:
             # Vorherige Schlüssel-Färbung zurücksetzen
             for i in range(self.listbox_left.size()):
-                if self.listbox_left.itemcget(i, "bg") == "#FFD700":
+                if self.listbox_left.itemcget(i, "bg") == constants.PRIM_KEY_SELECT_BG_COL:
                     self.listbox_left.itemconfig(i, bg="white", fg="black")
             
             self.key_left = self.listbox_left.get(index)
-            self.listbox_left.itemconfig(index, bg="#FFD700", fg="black") # Gold markieren
+            self.listbox_left.itemconfig(index, bg=constants.PRIM_KEY_SELECT_BG_COL, fg="black") # Gold markieren
 
     def set_key_right(self, event):
         index = self.listbox_right.nearest(event.y)
         if index >= 0:
             for i in range(self.listbox_right.size()):
-                if self.listbox_right.itemcget(i, "bg") == "#FFD700":
+                if self.listbox_right.itemcget(i, "bg") == constants.PRIM_KEY_SELECT_BG_COL:
                     self.listbox_right.itemconfig(i, bg="white", fg="black")
             
             self.key_right = self.listbox_right.get(index)
-            self.listbox_right.itemconfig(index, bg="#FFD700", fg="black")
+            self.listbox_right.itemconfig(index, bg=constants.PRIM_KEY_SELECT_BG_COL, fg="black")
 
     # --- DATEN EINLESEN ---
     def read_file(self, filepath: str):
@@ -240,6 +260,7 @@ class TableMergerApp:
                 self.key_left = None
                 for col in self.df_left.columns:
                     self.listbox_left.insert(tk.END, col)
+                self.btn_load_left.config(bg="#51995B", fg="#F7F7F7")
             except Exception as e:
                 messagebox.showerror("Ladefehler", str(e))
 
@@ -253,6 +274,7 @@ class TableMergerApp:
                 self.key_right = None
                 for col in self.df_right.columns:
                     self.listbox_right.insert(tk.END, col)
+                self.btn_load_right.config(bg="#51995B", fg="#F7F7F7")
             except Exception as e:
                 messagebox.showerror("Ladefehler", str(e))
 
@@ -381,6 +403,8 @@ class TableMergerApp:
                 else:
                     # CSV unterstützt prinzipiell keine Formatierungen wie Spaltenbreiten oder "Fett"
                     df_result.to_csv(save_path, index=False, sep=";")
+                    
+                messagebox.showinfo("Speichern erfolgreich", f"Die neue Tabelle wurde erfolgreich unter \"{save_path}\" abgespeichert.")
             except Exception as e:
                 messagebox.showerror("Merge-Fehler", str(e))
 
