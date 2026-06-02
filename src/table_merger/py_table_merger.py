@@ -5,6 +5,117 @@ from tkinter import filedialog, messagebox
 import pandas as pd
 import constants
 
+class RenameColumnsDialog(tk.Toplevel):
+    def __init__(self, parent, columns):
+        super().__init__(parent)
+        self.title("Spalten umbenennen")
+        
+        # Feste Startgröße definieren
+        self.geometry("500x450")
+        self.minsize(400, 300)
+        
+        # Modal machen (blockiert das Hauptfenster)
+        self.transient(parent)
+        self.grab_set()
+        
+        self.result = None
+        self.entries = {}
+        
+        # --- HAUPTLAYOUT ---
+        # Wir nutzen pack() für die Hauptelemente, um die Buttons fest unten zu verankern.
+        
+        # 1. Überschrift / Info-Label ganz oben
+        lbl_info = tk.Label(
+            self, 
+            text="Passen Sie hier die Spaltennamen für den Export an:", 
+            font=("Roboto", 10, "italic"), 
+            fg="gray30"
+        )
+        lbl_info.pack(fill="x", padx=15, pady=(10, 5), anchor="w")
+        
+        # 2. Button-Frame ganz unten FIXIEREN (wichtig: zuerst packen oder side="bottom" nutzen)
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(fill="x", side="bottom", padx=15, pady=15)
+        
+        btn_cancel = tk.Button(btn_frame, text="Abbrechen", command=self.on_cancel, width=10)
+        btn_cancel.pack(side="right", padx=5)
+        
+        btn_ok = tk.Button(
+            btn_frame,
+            text="Übernehmen",
+            command=self.on_ok,
+            width=12,
+            bg=constants.CONFIRM_BTN_BG_COL,
+            activebackground=constants.CONFIRM_BTN_ACTIVE_BG_COL,
+            fg=constants.CONFIRM_BTN_FG_COL,
+            activeforeground=constants.CONFIRM_BTN_ACTIVE_FG_COL,
+            font=("Roboto", 9, "bold")
+        )
+        btn_ok.pack(side="right", padx=5)
+        
+        # 3. Der mittlere, scrollbare Bereich (erhält den restlichen Platz durch expand=True)
+        container = tk.Frame(self)
+        container.pack(fill="both", expand=True, padx=15, pady=5)
+        
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        
+        self.scrollable_frame = tk.Frame(canvas)
+        
+        # Grid-Gewichtung im scrollable_frame, damit Spalten gleichmäßig verteilt werden
+        self.scrollable_frame.columnconfigure(0, weight=1)
+        self.scrollable_frame.columnconfigure(1, weight=1)
+        
+        # Event: Wenn sich die Größe des inneren Frames ändert, Scrollregion anpassen
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        # WICHTIG: Das Fenster im Canvas zentrieren und an die Canvas-Breite koppeln
+        canvas_window = canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        
+        # Sorgt dafür, dass das innere Panel genauso breit wird wie der Canvas selbst
+        canvas.bind('<Configure>', lambda event: canvas.itemconfig(canvas_window, width=event.width))
+        
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # --- SPALTEN UND EINGABEFELDER IM GRID ---
+        # Spaltenüberschriften im scrollbaren Bereich
+        tk.Label(self.scrollable_frame, text="Ursprünglicher Name", font=("Roboto", 10, "bold")).grid(row=0, column=0, padx=10, pady=8, sticky="w")
+        tk.Label(self.scrollable_frame, text="Neuer Name", font=("Roboto", 10, "bold")).grid(row=0, column=1, padx=10, pady=8, sticky="ew")
+        
+        for idx, col in enumerate(columns, start=1):
+            lbl = tk.Label(self.scrollable_frame, text=col, fg="gray20", font=("Roboto", 9, "bold"), anchor="w")
+            lbl.grid(row=idx, column=0, padx=10, pady=6, sticky="w")
+            
+            entry = tk.Entry(self.scrollable_frame, font=("Roboto", 10))
+            entry.insert(0, col)  # Standardmäßig alten Namen einfügen
+            entry.grid(row=idx, column=1, padx=10, pady=6, sticky="ew")
+            
+            self.entries[col] = entry
+            
+        # Mausrad-Scrolling aktivieren
+        canvas.bind_all("<MouseWheel>", lambda event: canvas.yview_scroll(int(-1*(event.delta/120)), "units"))
+
+        self.wait_window(self)
+
+    def on_ok(self):
+        # Mapping von altem Namen zu neuem Namen erstellen
+        self.result = {}
+        for old_name, entry in self.entries.items():
+            new_name = entry.get().strip()
+            # Falls das Feld leer gelassen wurde, behalten wir den alten Namen
+            self.result[old_name] = new_name if new_name else old_name
+        self.destroy()
+
+    def on_cancel(self):
+        self.result = None
+        self.destroy()
+
 class Tooltip:
     def __init__(self, widget: tk.Widget, text_func):
         self.widget = widget
@@ -356,6 +467,17 @@ class TableMergerApp:
 
                 # DataFrame auf die sortierte Reihenfolge einschränken
                 df_result = df_result[final_columns_ordered]
+
+                # --- NEU: Dialog zum Umbenennen der Spalten aufrufen ---
+                rename_dialog = RenameColumnsDialog(self.root, df_result.columns)
+                
+                # Wenn der Benutzer den Dialog abbricht (result ist None), stoppen wir den Prozess
+                if rename_dialog.result is None:
+                    return
+                
+                # DataFrame mit den neuen Namen umbenennen
+                df_result = df_result.rename(columns=rename_dialog.result)
+                # -------------------------------------------------------
 
                 # 3. Speichern
                 if save_path.endswith(".xlsx"):
