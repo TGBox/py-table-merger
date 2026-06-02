@@ -1,5 +1,15 @@
 #type: ignore
 import os
+import sys
+
+# Berechne den Pfad zum "src"-Ordner (eine Ebene über dieser Datei)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.abspath(os.path.join(current_dir, ".."))
+
+# Füge "src" zu den Suchpfaden hinzu
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd

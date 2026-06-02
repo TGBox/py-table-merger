@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py_table_merger"
+version = "0.3.1"
+authors = [
+    { name = "Daniel Rösch", email = "droesch@data-al.de" }
+]
+description = "Ein Programm zur einfachen Verknüpfung von Datenbankexporttabellen."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests>=2.28.0",
+    "tkinter",
+    "pandas"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
