@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src\\py_table_merger.py'],
+    ['src\\table_merger\\py_table_merger.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['TableMerger_Logo.ico'],
 )

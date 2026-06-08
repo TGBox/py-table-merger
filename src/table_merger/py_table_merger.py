@@ -13,7 +13,7 @@ if src_dir not in sys.path:
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
-import constants
+import src.constants as constants
 
 class RenameColumnsDialog(tk.Toplevel):
     def __init__(self, parent, columns):
