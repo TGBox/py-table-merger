@@ -3,13 +3,13 @@ from typing import Final
 ### Colors.
 
 # Color for the selected primary key column backgrounds.
-PRIM_KEY_SELECT_BG_COL: Final = "#FFFBBE"
+PRIM_KEY_SELECT_BG_COL: Final = "#FFBEFF"
 # Confirm and merge button background color.
 CONFIRM_BTN_BG_COL: Final = "#266124"
 # Confirm and merge button foreground color.
 CONFIRM_BTN_FG_COL: Final = "#FFFFFF"
 # Confirm and merge button active background color.
-CONFIRM_BTN_ACTIVE_BG_COL: Final = "#39FF32"
+CONFIRM_BTN_ACTIVE_BG_COL: Final = "#71B96F"
 # Confirm and merge button active foreground color.
 CONFIRM_BTN_ACTIVE_FG_COL: Final = "#414141"
 # Export panel background color.
