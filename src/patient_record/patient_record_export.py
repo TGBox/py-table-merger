@@ -1,5 +1,9 @@
-"""Export "Patientenakte": baut aus dem kompletten CSV-Export einer Kundeninstanz
-eine lesbare Excel-Arbeitsmappe mit einem Blatt je Thema.
+"""Exporte aus dem kompletten CSV-Export einer Kundeninstanz als lesbare Excel-Arbeitsmappe.
+
+Zwei Profile teilen sich dieselbe Pipeline:
+  * PROFILE_RECORD   "Patientenakte"      – alle Themen, Patienten mit Patienten-Nr.
+  * PROFILE_OVERVIEW "Patientenübersicht" – Patienten, Dubletten, Termine; KEINE Datenbank-IDs,
+                                            stattdessen eine laufende Nr. mit internen Links.
 
 Die Logik ist bewusst GUI-frei (reine pandas-Funktionen), damit sie testbar bleibt.
 Fehlende optionale Tabellen führen nicht zum Abbruch, das jeweilige Blatt entfällt.
@@ -22,12 +26,13 @@ OPTIONAL_TABLES = [
     "events", "resources", "rezepte", "rezepte_events",
     "anatomy", "anatomy_patienten",
     "kartei", "kartei_history", "kartei_content", "pat_property",
-    "history", "files",
+    "history", "files", "rechnung",
 ]
 
 # Feste Blattnamen
 SHEET_OVERVIEW = "Übersicht"
 SHEET_PATIENTS = "Patienten"
+SHEET_PATIENT_OVERVIEW = "Patienten"
 SHEET_DUPLICATES = "Mögliche Dubletten"
 SHEET_EVENTS = "Termine & Dokumentation"
 SHEET_PRESCRIPTIONS = "Verordnungen"
@@ -37,7 +42,10 @@ SHEET_FILES = "Dokumente"
 QUESTIONNAIRE_PREFIX = "Fragebogen"
 
 # Spalten, mit denen jedes Blatt den Patienten identifiziert
-PATIENT_REF_COLS = ["Patienten-Nr", "Nachname", "Vorname", "Geburtsdatum"]
+ID_COL = "Patienten-Nr"
+RUNNING_NO_COL = "Lfd. Nr."
+PATIENT_REF_COLS = [ID_COL, "Nachname", "Vorname", "Geburtsdatum"]
+UNKNOWN_PATIENT = "(unbekannter Patient)"
 
 _YES = {"1", "t", "true", "ja", "j", "y", "yes"}
 _NO = {"0", "f", "false", "nein", "n", "no"}
@@ -71,6 +79,39 @@ MAX_SIMILARITY_BLOCK = 200
 DATA_PROTECTION_NOTE = (
     "Diese Datei enthält personenbezogene Gesundheitsdaten (Art. 9 DSGVO). "
     "Nur verschlüsselt bzw. über einen sicheren Weg weitergeben."
+)
+
+
+LINK_NOTE = (
+    "Die Lfd. Nr. ist anklickbar (Patienten \u2192 Termine, Termine/Dubletten \u2192 Patienten). "
+    "Die Nummer gilt nur in dieser Datei. Nach dem Umsortieren eines Blatts können Links auf "
+    "falsche Zeilen zeigen \u2013 zum Zurücksetzen nach \u201eLfd. Nr.\u201c (und Datum) sortieren."
+)
+
+
+@dataclass(frozen=True)
+class ExportProfile:
+    title: str              # Anzeigename, z. B. für Meldungen
+    file_prefix: str        # Vorschlag für den Dateinamen
+    sheets: tuple           # Blatt-Schlüssel (siehe build_sheets) in Ausgabe-Reihenfolge
+    anonymous: bool         # True: laufende Nr. statt Datenbank-IDs, interne Links
+    tables: tuple           # benötigte Tabellen (nur diese werden als "fehlend" gemeldet)
+
+
+PROFILE_RECORD = ExportProfile(
+    title="Patientenakte",
+    file_prefix="Patientenakte",
+    sheets=("patients", "duplicates", "events", "prescriptions", "findings",
+            "questionnaires", "notes", "files"),
+    anonymous=False,
+    tables=tuple(t for t in OPTIONAL_TABLES if t != "rechnung"),
+)
+PROFILE_OVERVIEW = ExportProfile(
+    title="Patientenübersicht",
+    file_prefix="Patientenuebersicht",
+    sheets=("patient_overview", "duplicates", "events"),
+    anonymous=True,
+    tables=("events", "resources", "rezepte", "rezepte_events", "files", "rechnung"),
 )
 
 
@@ -221,25 +262,54 @@ def sheet_name(name: str, used: set) -> str:
 # --------------------------------------------------------------------------- #
 # Patientenbezug
 # --------------------------------------------------------------------------- #
-def patient_reference(patients: pd.DataFrame) -> pd.DataFrame:
-    """Tabelle interne Patienten-ID -> Anzeige-Spalten (PATIENT_REF_COLS) + Sortierschlüssel."""
+def patient_reference(patients: pd.DataFrame, anonymous: bool = False) -> pd.DataFrame:
+    """Tabelle interne Patienten-ID (__pid) -> Anzeige-Spalten.
+
+    anonymous=False: Patienten-Nr, Nachname, Vorname, Geburtsdatum
+    anonymous=True:  Lfd. Nr. (1..n nach Name/Vorname/Geburtsdatum), Nachname, Vorname, Geburtsdatum
+    """
+    patients = patients.drop_duplicates("id")
     ref = pd.DataFrame({
         "__pid": patients["id"],
-        "Patienten-Nr": _col(patients, "p_nr").fillna(patients["id"]),
+        ID_COL: _col(patients, "p_nr").fillna(patients["id"]),
         "Nachname": _col(patients, "p_name"),
         "Vorname": _col(patients, "p_vname"),
         "Geburtsdatum": to_date(_col(patients, "p_birth")),
     })
-    return ref.drop_duplicates("__pid")
+    if anonymous:
+        order = pd.DataFrame({
+            "a": _german_key(ref["Nachname"]), "b": _german_key(ref["Vorname"]),
+            "c": _col(patients, "p_birth").fillna("").astype(str), "d": ref["__pid"].astype(str),
+        }, index=ref.index).sort_values(["a", "b", "c", "d"], kind="stable").index
+        ref = ref.loc[order].reset_index(drop=True)
+        ref[ID_COL] = range(1, len(ref) + 1)
+        ref = ref.rename(columns={ID_COL: RUNNING_NO_COL})
+    return ref
+
+
+def ref_columns(ref: pd.DataFrame) -> list:
+    """Sichtbare Patienten-Spalten der Referenz (ohne interne ID)."""
+    return [c for c in ref.columns if c != "__pid"]
+
+
+def is_anonymous(ref: pd.DataFrame) -> bool:
+    return RUNNING_NO_COL in ref.columns
 
 
 def attach_patient(df: pd.DataFrame, pid: pd.Series, ref: pd.DataFrame) -> pd.DataFrame:
-    """Stellt die Patienten-Spalten vor df. Unbekannte Patienten behalten ihre ID als Patienten-Nr."""
+    """Stellt die Patienten-Spalten vor df.
+    Unbekannte Patienten: mit IDs behält die Zeile die rohe ID als Patienten-Nr,
+    anonym bleibt die Nr. leer und der Name lautet "(unbekannter Patient)"."""
     keys = pd.DataFrame({"__pid": pid.values})
     merged = keys.merge(ref, on="__pid", how="left")
-    merged["Patienten-Nr"] = merged["Patienten-Nr"].fillna(merged["__pid"])
+    if is_anonymous(ref):
+        unknown = merged[RUNNING_NO_COL].isna()
+        merged["Nachname"] = merged["Nachname"].astype(object).where(~unknown, UNKNOWN_PATIENT)
+        merged[RUNNING_NO_COL] = merged[RUNNING_NO_COL].astype("Int64")
+    else:
+        merged[ID_COL] = merged[ID_COL].fillna(merged["__pid"])
     merged.index = df.index
-    return pd.concat([merged[PATIENT_REF_COLS], df], axis=1)
+    return pd.concat([merged[ref_columns(ref)], df], axis=1)
 
 
 _UMLAUTS = str.maketrans({"ä": "a", "ö": "o", "ü": "u", "ß": "ss"})
@@ -251,11 +321,15 @@ def _german_key(series: pd.Series) -> pd.Series:
 
 
 def sort_by_patient(df: pd.DataFrame, *extra_raw_keys: pd.Series) -> pd.DataFrame:
-    """Sortiert nach Nachname, Vorname, Patienten-Nr und optional weiteren (Roh-)Schlüsseln."""
+    """Sortiert nach Nachname, Vorname, Patienten-Nr bzw. Lfd. Nr. und optional weiteren (Roh-)Schlüsseln."""
+    if ID_COL in df.columns:
+        third = df[ID_COL].fillna("").astype(str)
+    else:
+        third = pd.to_numeric(df[RUNNING_NO_COL], errors="coerce").astype("float64").fillna(float("inf"))
     keys = pd.DataFrame({
         "a": _german_key(df["Nachname"]),
         "b": _german_key(df["Vorname"]),
-        "c": df["Patienten-Nr"].fillna("").astype(str),
+        "c": third,
     }, index=df.index)
     for i, k in enumerate(extra_raw_keys):
         keys[f"k{i}"] = k.fillna("").astype(str).values
@@ -298,6 +372,27 @@ class _RefResolver:
 # --------------------------------------------------------------------------- #
 # Blätter
 # --------------------------------------------------------------------------- #
+def patient_activity(t, resolver=None) -> dict:
+    """Je Patienten-ID: Anzahl Termine, letzter Termin, Verordnungen, Rechnungen (ohne Stornos), Dokumente."""
+    activity = {"events": {}, "last_event": {}, "prescriptions": {}, "invoices": {}, "files": {}}
+    if "events" in t:
+        e = t["events"].dropna(subset=["patient_id"])
+        activity["events"] = e.groupby("patient_id")["id"].count().to_dict()
+        if "start" in e:
+            activity["last_event"] = e.groupby("patient_id")["start"].max().to_dict()
+    if "rezepte" in t:
+        activity["prescriptions"] = t["rezepte"].groupby("patienten_id")["id"].count().to_dict()
+    if "rechnung" in t:
+        r = t["rechnung"]
+        cancelled = _col(r, "status").fillna("").astype(str).str.lower().str.startswith("storn")
+        cancelled |= _col(r, "storniert_am").notna()
+        activity["invoices"] = r[~cancelled].groupby("patienten_id")["id"].count().to_dict()
+    if "files" in t and resolver is not None:
+        pid, _ = resolver.apply(t["files"])
+        activity["files"] = pid.dropna().value_counts().to_dict()
+    return activity
+
+
 def build_patients(t) -> pd.DataFrame:
     p = t["patienten"]
     df = pd.DataFrame({
@@ -328,6 +423,39 @@ def build_patients(t) -> pd.DataFrame:
     return sort_by_patient(df)
 
 
+def build_patient_overview(t, ref, activity: dict) -> pd.DataFrame:
+    """Patientenliste ohne IDs: persönliche Daten, Versicherung und Aktivitätszahlen, nach Lfd. Nr."""
+    p = t["patienten"].drop_duplicates("id").reset_index(drop=True)
+    pid = p["id"]
+    df = pd.DataFrame({
+        "Anrede": _col(p, "p_anrede"),
+        "Straße": _col(p, "p_street"),
+        "Hausnummer": _col(p, "p_hausnummer"),
+        "PLZ": _col(p, "p_plz"),
+        "Ort": _col(p, "p_ort"),
+        "Telefon": _col(p, "p_tel"),
+        "Telefon geschäftlich": _col(p, "p_telge"),
+        "Mobil": _col(p, "p_handy"),
+        "E-Mail": _col(p, "p_email"),
+        "Krankenkasse": _col(p, "p_krankenkasse"),
+        "Versichertennummer": _col(p, "p_vnr"),
+        "Privatversichert": yes_no(_col(p, "p_privatversichert")),
+        "Zuzahlungsbefreit": yes_no(_col(p, "p_zuzahlungsbefreit")),
+        "Angelegt am": to_date(_col(p, "erstellt_am")),
+        "Letzter Termin": to_date(pid.map(activity["last_event"]).astype(object)),
+        "Anzahl Termine": pid.map(activity["events"]).fillna(0).astype(int),
+        "Anzahl Verordnungen": pid.map(activity["prescriptions"]).fillna(0).astype(int),
+        "Anzahl Rechnungen": pid.map(activity["invoices"]).fillna(0).astype(int),
+    }, index=p.index)
+    df = attach_patient(df, pid, ref)
+    # Anrede direkt hinter die Lfd. Nr.
+    cols = list(df.columns)
+    cols.insert(1, cols.pop(cols.index("Anrede")))
+    df = df[cols]
+    key = RUNNING_NO_COL if RUNNING_NO_COL in df.columns else ID_COL
+    return df.sort_values(key, kind="stable").reset_index(drop=True)
+
+
 def build_events(t, ref) -> pd.DataFrame:
     if "events" not in t:
         return None
@@ -342,7 +470,10 @@ def build_events(t, ref) -> pd.DataFrame:
     if "rezepte_events" in t and "rezepte" in t:
         numbers = dict(zip(t["rezepte"]["id"], _col(t["rezepte"], "rezeptnr")))
         re_ = t["rezepte_events"].dropna(subset=["events_id"])
-        nr = re_["rezepte_id"].map(numbers).fillna(re_["rezepte_id"])
+        nr = re_["rezepte_id"].map(numbers)
+        if not is_anonymous(ref):  # ohne Rezept-Nr. notfalls die interne ID zeigen
+            nr = nr.fillna(re_["rezepte_id"])
+        re_, nr = re_[nr.notna()], nr.dropna()
         prescription_of_event = nr.groupby(re_["events_id"]).agg(
             lambda s: ", ".join(sorted(set(s.astype(str))))
         ).to_dict()
@@ -353,7 +484,8 @@ def build_events(t, ref) -> pd.DataFrame:
         "Ende": to_time(_col(e, "end")),
         "Dauer (Min.)": to_number(_col(e, "duration")),
         "Behandlung": _col(e, "title"),
-        "Therapeut": _col(e, "resource").map(lambda r: therapists.get(r, r) if pd.notna(r) else None),
+        "Therapeut": _col(e, "resource").map(
+            lambda r: therapists.get(r, None if is_anonymous(ref) else r) if pd.notna(r) else None),
         "Verordnung (Rezept-Nr)": e["id"].map(prescription_of_event),
         "Termin der Serie": _col(e, "eventsequenz"),
         "Wahrgenommen": yes_no(_col(e, "wahrgenommen")),
@@ -665,32 +797,27 @@ def _group_pairs(pairs: list) -> list:
     return list(groups.values())
 
 
-def build_duplicates(t, resolver=None) -> pd.DataFrame:
+def build_duplicates(t, resolver=None, ref=None, activity=None) -> pd.DataFrame:
     """Blatt "Mögliche Dubletten": eine Zeile je Patient, zusammengehörige Datensätze tragen
     dieselbe Gruppen-Nr. Zusatzspalten (Termine, Verordnungen ...) helfen bei der Entscheidung,
     welcher Datensatz behalten werden soll."""
     p = t["patienten"].drop_duplicates("id").reset_index(drop=True)
-    columns = ["Gruppe", "Übereinstimmung"] + PATIENT_REF_COLS + [
+    if ref is None:
+        ref = patient_reference(p)
+    if activity is None:
+        activity = patient_activity(t, resolver)
+    detail_cols = [
         "Anrede", "Anschrift", "Telefon", "Krankenkasse", "Versichertennummer", "Angelegt am",
         "Anzahl Termine", "Letzter Termin", "Anzahl Verordnungen", "Anzahl Dokumente",
     ]
+    columns = ["Gruppe", "Übereinstimmung"] + ref_columns(ref) + detail_cols
     groups = _group_pairs(find_duplicate_pairs(p))
     if not groups:
         return pd.DataFrame(columns=columns)
 
-    event_count, last_event, rx_count, file_count = {}, {}, {}, {}
-    if "events" in t:
-        e = t["events"].dropna(subset=["patient_id"])
-        event_count = e.groupby("patient_id")["id"].count().to_dict()
-        last_event = e.groupby("patient_id")["start"].max().to_dict() if "start" in e else {}
-    if "rezepte" in t:
-        rx_count = t["rezepte"].groupby("patienten_id")["id"].count().to_dict()
-    if "files" in t and resolver is not None:
-        pid, _ = resolver.apply(t["files"])
-        file_count = pid.dropna().value_counts().to_dict()
-
     rule_rank = {rule: i for i, rule in enumerate(DUP_RULES)}
     sort_name = _german_key(_col(p, "p_name")) + " " + _german_key(_col(p, "p_vname"))
+    birth = _col(p, "p_birth").fillna("").astype(str)
     ordered = sorted(
         groups,
         key=lambda g: (min(rule_rank[r] for r in g[1]), min(sort_name[i] for i in g[0])),
@@ -699,67 +826,149 @@ def build_duplicates(t, resolver=None) -> pd.DataFrame:
     rows = []
     for number, (members, rules) in enumerate(ordered, start=1):
         reason = "; ".join(sorted(rules, key=rule_rank.get))
-        for i in sorted(members, key=lambda i: (sort_name[i], str(_col(p, "p_birth")[i]))):
+        for i in sorted(members, key=lambda i: (sort_name[i], birth[i])):
             r = p.loc[i]
             pid = r["id"]
             street = " ".join(str(x) for x in [r.get("p_street"), r.get("p_hausnummer")] if pd.notna(x))
             city = " ".join(str(x) for x in [r.get("p_plz"), r.get("p_ort")] if pd.notna(x))
             phone = r.get("p_tel") if pd.notna(r.get("p_tel")) else r.get("p_handy")
             rows.append({
+                "__pid": pid,
                 "Gruppe": number,
                 "Übereinstimmung": reason,
-                "Patienten-Nr": r.get("p_nr") if pd.notna(r.get("p_nr")) else pid,
-                "Nachname": r.get("p_name"),
-                "Vorname": r.get("p_vname"),
-                "Geburtsdatum": r.get("p_birth"),
                 "Anrede": r.get("p_anrede"),
                 "Anschrift": ", ".join(x for x in [street, city] if x) or None,
                 "Telefon": phone,
                 "Krankenkasse": r.get("p_krankenkasse"),
                 "Versichertennummer": r.get("p_vnr"),
                 "Angelegt am": r.get("erstellt_am"),
-                "Anzahl Termine": event_count.get(pid, 0),
-                "Letzter Termin": last_event.get(pid),
-                "Anzahl Verordnungen": rx_count.get(pid, 0),
-                "Anzahl Dokumente": file_count.get(pid, 0),
+                "Anzahl Termine": activity["events"].get(pid, 0),
+                "Letzter Termin": activity["last_event"].get(pid),
+                "Anzahl Verordnungen": activity["prescriptions"].get(pid, 0),
+                "Anzahl Dokumente": activity["files"].get(pid, 0),
             })
-    df = pd.DataFrame(rows, columns=columns)
-    for col in ("Geburtsdatum", "Angelegt am", "Letzter Termin"):
+    df = pd.DataFrame(rows)
+    for col in ("Angelegt am", "Letzter Termin"):
         df[col] = to_date(df[col].astype(object))
-    return df
+    df = attach_patient(df.drop(columns="__pid"), df["__pid"], ref)
+    return df[columns]
 
 
-def build_overview(sheets: dict, missing: list, source: str) -> pd.DataFrame:
+# --------------------------------------------------------------------------- #
+# Profile, Links, Ausgabe
+# --------------------------------------------------------------------------- #
+def build_sheets(tables: dict, profile: ExportProfile = PROFILE_RECORD) -> dict:
+    """Erzeugt die Blätter des Profils (Name -> DataFrame) in Ausgabe-Reihenfolge, ohne Übersicht.
+    Blätter, deren Quelltabellen fehlen, werden ausgelassen."""
+    ref = patient_reference(tables["patienten"], anonymous=profile.anonymous)
+    resolver = _RefResolver(tables)
+    activity = patient_activity(tables, resolver)
+    builders = {
+        "patients": lambda: [(SHEET_PATIENTS, build_patients(tables))],
+        "patient_overview": lambda: [(SHEET_PATIENT_OVERVIEW, build_patient_overview(tables, ref, activity))],
+        "duplicates": lambda: [(SHEET_DUPLICATES, build_duplicates(tables, resolver, ref, activity))],
+        "events": lambda: [(SHEET_EVENTS, build_events(tables, ref))],
+        "prescriptions": lambda: [(SHEET_PRESCRIPTIONS, build_prescriptions(tables, ref))],
+        "findings": lambda: [(SHEET_FINDINGS, build_findings(tables, ref))],
+        "questionnaires": lambda: list(build_questionnaires(tables, ref).items()),
+        "notes": lambda: [(SHEET_NOTES, build_notes(tables, ref, resolver))],
+        "files": lambda: [(SHEET_FILES, build_files(tables, ref, resolver))],
+    }
+    sheets = {}
+    for key in profile.sheets:
+        for name, df in builders[key]():
+            if df is not None:
+                sheets[name] = df
+    return sheets
+
+
+def build_links(sheets: dict) -> list:
+    """Interne Links über die Lfd. Nr. (nur anonymes Profil):
+    Patienten -> erster Termin, Termine -> Patient, Dubletten -> Patient.
+    Rückgabe: [(Quellblatt, Spalte, Zielblatt, {Lfd. Nr.: Excel-Zeile})]."""
+    patients = sheets.get(SHEET_PATIENT_OVERVIEW)
+    if patients is None or RUNNING_NO_COL not in patients.columns:
+        return []
+    # Excel-Zeile = Position + 2 (Zeile 1 ist die Überschrift)
+    patient_rows = {int(nr): pos + 2 for pos, nr in enumerate(patients[RUNNING_NO_COL]) if pd.notna(nr)}
+    links = []
+    events = sheets.get(SHEET_EVENTS)
+    if events is not None and len(events):
+        first_event_rows = {}
+        for pos, nr in enumerate(events[RUNNING_NO_COL]):
+            if pd.notna(nr):
+                first_event_rows.setdefault(int(nr), pos + 2)
+        links.append((SHEET_PATIENT_OVERVIEW, RUNNING_NO_COL, SHEET_EVENTS, first_event_rows))
+        links.append((SHEET_EVENTS, RUNNING_NO_COL, SHEET_PATIENT_OVERVIEW, patient_rows))
+    duplicates = sheets.get(SHEET_DUPLICATES)
+    if duplicates is not None and len(duplicates):
+        links.append((SHEET_DUPLICATES, RUNNING_NO_COL, SHEET_PATIENT_OVERVIEW, patient_rows))
+    return links
+
+
+def build_overview(sheets: dict, missing: list, source: str, notes=()) -> pd.DataFrame:
     """Deckblatt: Erstellungszeitpunkt, Quelle, Datenschutzhinweis und Anzahl Einträge je Blatt."""
     rows = [
         ("Erstellt am", f"{datetime.datetime.now():%d.%m.%Y %H:%M}"),
         ("Quelle (Export-Ordner)", source),
         ("Datenschutz", DATA_PROTECTION_NOTE),
-        (None, None),
     ]
+    rows += list(notes)
+    rows += [(None, None)]
     rows += [(f"Blatt \u201e{name}\u201c", f"{len(df)} Eintrag" if len(df) == 1 else f"{len(df)} Einträge") for name, df in sheets.items()]
     if missing:
         rows += [(None, None), ("Nicht im Export enthalten", ", ".join(f"{m}.csv" for m in missing))]
     return pd.DataFrame(rows, columns=["Angabe", "Wert"])
 
 
-def write_workbook(sheets: dict, overview: pd.DataFrame, out_path: str) -> dict:
+def _write_links(writer, df: pd.DataFrame, sheet: str, column: str, target_sheet: str, rows: dict):
+    """Ersetzt die Zellen einer Spalte durch HYPERLINK-Formeln auf Zeilen eines anderen Blatts.
+    Als Formel (statt Text-Link) bleibt die Nummer eine Zahl -> numerisches Sortieren/Filtern."""
+    worksheet = writer.sheets[sheet]
+    link_format = writer.book.add_format({"font_color": "#0563C1", "underline": 1})
+    col = df.columns.get_loc(column)
+    target = target_sheet.replace("'", "''")
+    for pos, nr in enumerate(df[column]):
+        if pd.isna(nr) or int(nr) not in rows:
+            continue
+        formula = f'=HYPERLINK("#\'{target}\'!A{rows[int(nr)]}",{int(nr)})'
+        worksheet.write_formula(pos + 1, col, formula, link_format, int(nr))
+
+
+def write_workbook(sheets: dict, overview: pd.DataFrame, out_path: str, links=()) -> dict:
     """Schreibt die Arbeitsmappe. Gibt die tatsächlich verwendeten Blattnamen -> Zeilen zurück."""
-    used, counts = set(), {}
+    used, counts, final_names = set(), {}, {}
     with table_io.excel_writer(out_path, date_format="DD.MM.YYYY",
                                datetime_format="DD.MM.YYYY HH:MM") as writer:
         table_io.write_excel_sheet(writer, overview, sheet_name(SHEET_OVERVIEW, used), autofilter=False)
         for name, df in sheets.items():
             final = sheet_name(name, used)
+            final_names[name] = final
             table_io.write_excel_sheet(writer, df, final)
             counts[final] = len(df)
+        for source, column, target, rows in links:
+            if source in final_names and target in final_names:
+                _write_links(writer, sheets[source], final_names[source], column, final_names[target], rows)
     return counts
 
 
-def export_patient_record(folder: str, out_path: str) -> ExportResult:
-    """Komplettablauf: Export-Ordner lesen -> Blätter bauen -> Excel schreiben."""
+def export_workbook(folder: str, out_path: str, profile: ExportProfile) -> ExportResult:
+    """Komplettablauf für ein Profil: Export-Ordner lesen -> Blätter bauen -> Excel schreiben."""
     tables, missing = load_export_folder(folder)
-    sheets = build_sheets(tables)
-    overview = build_overview(sheets, missing, os.path.basename(os.path.normpath(folder)))
-    counts = write_workbook(sheets, overview, out_path)
+    missing = [m for m in missing if m in profile.tables]
+    sheets = build_sheets(tables, profile)
+    links = build_links(sheets) if profile.anonymous else []
+    notes = [("Navigation", LINK_NOTE)] if links else []
+    overview = build_overview(sheets, missing, os.path.basename(os.path.normpath(folder)), notes)
+    counts = write_workbook(sheets, overview, out_path, links)
     return ExportResult(out_path=out_path, sheet_counts=counts, missing_tables=missing)
+
+
+def export_patient_record(folder: str, out_path: str) -> ExportResult:
+    """Patientenakte: alle Themen, Patienten mit Patienten-Nr."""
+    return export_workbook(folder, out_path, PROFILE_RECORD)
+
+
+def export_patient_overview(folder: str, out_path: str) -> ExportResult:
+    """Patientenübersicht: Patienten (mit Zählungen), Dubletten, Termine – ohne Datenbank-IDs."""
+    return export_workbook(folder, out_path, PROFILE_OVERVIEW)

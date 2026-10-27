@@ -321,6 +321,25 @@ class TestTableMergerApp(unittest.TestCase):
         self.assertIn("Patienten: 3 Einträge", message)
         self.assertIn("files.csv", message)
 
+    @patch("tkinter.messagebox.showinfo")
+    @patch("tkinter.filedialog.asksaveasfilename", return_value="uebersicht.xlsx")
+    @patch("tkinter.filedialog.askdirectory")
+    def test_patient_overview_button_flow(self, mock_dir, mock_save, mock_info):
+        """Button "Patientenübersicht": eigener Export, eigener Dateiname-Vorschlag."""
+        import tempfile
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "patienten.csv"), "w").close()
+        mock_dir.return_value = folder
+        fake_result = MagicMock(sheet_counts={"Patienten": 2}, missing_tables=[])
+        with patch("table_merger.py_table_merger.patient_record_export.export_patient_overview",
+                   return_value=fake_result) as mock_export, \
+             patch("table_merger.py_table_merger.patient_record_export.export_patient_record") as mock_record:
+            self.app.export_patient_overview()
+        mock_export.assert_called_once_with(folder, "uebersicht.xlsx")
+        mock_record.assert_not_called()
+        self.assertTrue(mock_save.call_args.kwargs["initialfile"].startswith("Patientenuebersicht_"))
+        self.assertEqual(mock_info.call_args[0][0], "Patientenübersicht erstellt")
+
     @patch("tkinter.messagebox.showwarning")
     @patch("tkinter.filedialog.asksaveasfilename")
     @patch("tkinter.filedialog.askdirectory")
