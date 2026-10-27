@@ -505,7 +505,7 @@ class TableMergerApp:
                 # 3. Speichern
                 if save_path.endswith(".xlsx"):
                     # Formatierter Export (fette Überschriften, Spaltenbreiten, Filter) – siehe table_io
-                    with pd.ExcelWriter(save_path, engine="xlsxwriter") as writer:
+                    with table_io.excel_writer(save_path) as writer:
                         table_io.write_excel_sheet(writer, df_result, "Merge_Ergebnis")
 
                 else:

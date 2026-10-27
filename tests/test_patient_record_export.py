@@ -243,6 +243,31 @@ class TestExportWorkbook(PatientRecordTestBase):
         self.assertLessEqual(len(report), 32767)
         self.assertTrue(report.endswith("[…gekürzt]"))
 
+    def test_text_starting_with_equals_stays_text(self):
+        """Regression: Doku "=> Besserung" wurde als (ungültige) Formel geschrieben -> Excel-Reparatur."""
+        import zipfile
+        path = os.path.join(self.folder, "events.csv")
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        content = content.replace('"Mobilisation HWS"', '"=> deutliche Besserung"')
+        content = content.replace('"Befund"', '"=SUMME(A1:A3)"')
+        content = content.replace('"KG";"R1";"P1";"0"', '"https://example.org";"R1";"P1";"0"')
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        out = os.path.join(self.folder, "akte.xlsx")
+        pr.export_patient_record(self.folder, out)
+        with zipfile.ZipFile(out) as z:
+            for name in z.namelist():
+                if name.startswith("xl/worksheets/"):
+                    xml = z.read(name).decode("utf-8")
+                    self.assertNotIn("<f>", xml, name)
+                    self.assertNotIn("<hyperlink", xml, name)
+        e = pd.read_excel(out, sheet_name=pr.SHEET_EVENTS, dtype=str)
+        self.assertIn("=> deutliche Besserung", e["Dokumentation"].tolist())
+        self.assertIn("=SUMME(A1:A3)", e["Stichwort"].tolist())
+        self.assertIn("https://example.org", e["Behandlung"].tolist())
+
     def test_export_cp1252_folder(self):
         """Exporte in Windows-Kodierung werden ebenfalls gelesen."""
         path = os.path.join(self.folder, "patienten.csv")

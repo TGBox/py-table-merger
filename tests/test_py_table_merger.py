@@ -251,6 +251,32 @@ class TestTableMergerApp(unittest.TestCase):
         mock_warn.assert_called_once()
         self.assertFalse(os.path.exists("test_dup.csv"))
 
+    def test_excel_export_text_with_equals_sign(self):
+        """Regression: Text mit führendem "=" darf im Merger-Export keine Formel werden."""
+        import zipfile
+        left = pd.DataFrame({"id": ["P1"], "plz": ["01067"]})
+        right = pd.DataFrame({"pid": ["P1"], "doku": ["=> Besserung"]})
+        self.app.df_left, self.app.df_right = left, right
+        self.app.key_left, self.app.key_right = "id", "pid"
+        self.app.listbox_left.insert(tk.END, "id", "plz")
+        self.app.listbox_right.insert(tk.END, "pid", "doku")
+        self.app.listbox_left.selection_set(1)
+        self.app.listbox_right.selection_set(1)
+        self.app.listbox_export.insert(tk.END, "plz", "doku")
+        save_path = "test_formula.xlsx"
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=save_path), \
+             patch("tkinter.messagebox.showinfo"), \
+             patch("table_merger.py_table_merger.RenameColumnsDialog") as dlg:
+            dlg.side_effect = lambda parent, cols: MagicMock(result={c: c for c in cols})
+            self.app.perform_merge()
+        try:
+            with zipfile.ZipFile(save_path) as z:
+                self.assertNotIn("<f>", z.read("xl/worksheets/sheet1.xml").decode("utf-8"))
+            self.assertEqual(pd.read_excel(save_path, dtype=str).loc[0, "doku"], "=> Besserung")
+        finally:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+
     def test_excel_export_long_text(self):
         """Excel-Export mit langen Texten (Dokumentation) und Text-Zahlen läuft fehlerfrei durch."""
         left = pd.DataFrame({"id": ["P1"], "plz": ["01067"]})

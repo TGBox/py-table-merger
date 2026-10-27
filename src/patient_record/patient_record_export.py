@@ -560,8 +560,8 @@ def build_overview(sheets: dict, missing: list, source: str) -> pd.DataFrame:
 def write_workbook(sheets: dict, overview: pd.DataFrame, out_path: str) -> dict:
     """Schreibt die Arbeitsmappe. Gibt die tatsächlich verwendeten Blattnamen -> Zeilen zurück."""
     used, counts = set(), {}
-    with pd.ExcelWriter(out_path, engine="xlsxwriter",
-                        date_format="DD.MM.YYYY", datetime_format="DD.MM.YYYY HH:MM") as writer:
+    with table_io.excel_writer(out_path, date_format="DD.MM.YYYY",
+                               datetime_format="DD.MM.YYYY HH:MM") as writer:
         table_io.write_excel_sheet(writer, overview, sheet_name(SHEET_OVERVIEW, used), autofilter=False)
         for name, df in sheets.items():
             final = sheet_name(name, used)

@@ -52,6 +52,21 @@ def read_table(filepath: str) -> pd.DataFrame:
     raise ValueError("Ungültiges Dateiformat.")
 
 
+def excel_writer(path: str, **kwargs) -> pd.ExcelWriter:
+    """ExcelWriter (xlsxwriter), der Text IMMER als Text schreibt.
+
+    Standardmäßig wandelt xlsxwriter Texte, die mit "=" beginnen, in Formeln um
+    (z. B. Dokumentation "=> Besserung" -> ungültige Formel, Excel repariert/entfernt sie;
+    "=SUMME(...)" würde sogar ausgeführt) und Texte mit "http://..." in Hyperlinks.
+    Beides ist bei Datenbank-Exporten unerwünscht.
+    """
+    return pd.ExcelWriter(
+        path, engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_formulas": False, "strings_to_urls": False}},
+        **kwargs,
+    )
+
+
 def _truncate_long_text(df: pd.DataFrame) -> pd.DataFrame:
     """Kürzt Texte, die länger sind, als eine Excel-Zelle fassen kann."""
     limit = MAX_EXCEL_CELL_LEN - len(TRUNCATION_NOTE)
