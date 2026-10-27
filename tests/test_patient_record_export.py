@@ -164,7 +164,7 @@ class TestBuildSheets(PatientRecordTestBase):
 
     def test_sheet_order(self):
         self.assertEqual(list(self.sheets()), [
-            pr.SHEET_PATIENTS, pr.SHEET_EVENTS, pr.SHEET_PRESCRIPTIONS, pr.SHEET_FINDINGS,
+            pr.SHEET_PATIENTS, pr.SHEET_DUPLICATES, pr.SHEET_EVENTS, pr.SHEET_PRESCRIPTIONS, pr.SHEET_FINDINGS,
             "Fragebogen Anamnese", pr.SHEET_NOTES, pr.SHEET_FILES,
         ])
 
@@ -225,6 +225,91 @@ class TestBuildSheets(PatientRecordTestBase):
         self.assertEqual(files.iloc[0]["Nachname"], "Öztürk")
         self.assertEqual(files.iloc[0]["Kategorie"], "Rezept Vorderseite")
         self.assertEqual(files.iloc[0]["Größe (KB)"], 2)
+
+
+class TestDuplicates(unittest.TestCase):
+    def patients(self, rows):
+        base = {"p_nr": None, "p_anrede": None, "p_vnr": None, "p_street": None, "p_hausnummer": None,
+                "p_plz": None, "p_ort": None, "p_tel": None, "p_handy": None, "p_krankenkasse": None,
+                "erstellt_am": None}
+        df = pd.DataFrame([{**base, **r} for r in rows])
+        return {"patienten": df}
+
+    def groups(self, rows):
+        d = pr.build_duplicates(self.patients(rows))
+        return {g: (sorted(x["id_name"] for _, x in grp.iterrows()), grp["Übereinstimmung"].iloc[0])
+                for g, grp in d.assign(id_name=d["Nachname"] + " " + d["Vorname"]).groupby("Gruppe")}
+
+    def test_normalize_name(self):
+        self.assertEqual(pr.normalize_name(" Müller-Lüdenscheidt "), "muellerluedenscheidt")
+        self.assertEqual(pr.normalize_name("Ayşe"), "ayse")
+
+    def test_exact_duplicate_ignores_case_spaces_umlauts(self):
+        g = self.groups([
+            {"id": "A", "p_name": "Müller", "p_vname": "Hans", "p_birth": "1950-01-01"},
+            {"id": "B", "p_name": "MUELLER ", "p_vname": "hans", "p_birth": "1950-01-01"},
+            {"id": "C", "p_name": "Meier", "p_vname": "Hans", "p_birth": "1950-01-01"},
+        ])
+        self.assertEqual(len(g), 1)
+        self.assertEqual(g[1][1], pr.DUP_RULE_EXACT)
+
+    def test_similar_name_same_birthdate(self):
+        g = self.groups([
+            {"id": "A", "p_name": "Tehakol", "p_vname": "Selcuk", "p_birth": "1979-10-04"},
+            {"id": "B", "p_name": "Tahkol", "p_vname": "Selcuk", "p_birth": "1979-10-04"},
+            {"id": "C", "p_name": "Tahkol", "p_vname": "Selcuk", "p_birth": "1980-10-04"},
+        ])
+        # A~B (ähnlich, gleiches Datum) und B~C (gleicher Name, anderes Datum) -> eine Gruppe
+        self.assertEqual(len(g), 1)
+        self.assertEqual(len(g[1][0]), 3)
+        self.assertEqual(g[1][1], f"{pr.DUP_RULE_SIMILAR}; {pr.DUP_RULE_OTHER_BIRTH}")
+
+    def test_swapped_first_and_last_name(self):
+        g = self.groups([
+            {"id": "A", "p_name": "Peter", "p_vname": "Klaus", "p_birth": "1960-05-05"},
+            {"id": "B", "p_name": "Klaus", "p_vname": "Peter", "p_birth": "1960-05-05"},
+        ])
+        self.assertEqual(g[1][1], pr.DUP_RULE_SIMILAR)
+
+    def test_twins_with_different_first_names_are_not_duplicates(self):
+        g = self.groups([
+            {"id": "A", "p_name": "Schmidt", "p_vname": "Anna", "p_birth": "2001-02-03"},
+            {"id": "B", "p_name": "Schmidt", "p_vname": "Paul", "p_birth": "2001-02-03"},
+        ])
+        self.assertEqual(g, {})
+
+    def test_same_insurance_number(self):
+        g = self.groups([
+            {"id": "A", "p_name": "Nistelweck", "p_vname": "Ida", "p_birth": "1975-11-11", "p_vnr": "U871743736"},
+            {"id": "B", "p_name": "Nistelweck", "p_vname": "Ulrike", "p_birth": "1974-11-08", "p_vnr": "u 871743736"},
+            {"id": "C", "p_name": "X", "p_vname": "Y", "p_birth": "1974-11-08", "p_vnr": "0000000000"},
+            {"id": "D", "p_name": "Z", "p_vname": "W", "p_birth": "1974-11-08", "p_vnr": "0000000000"},
+        ])
+        self.assertEqual(len(g), 1)  # Platzhalter-Nummern zählen nicht
+        self.assertEqual(g[1][1], pr.DUP_RULE_INSURANCE_NO)
+
+    def test_strongest_rule_first_and_activity_counts(self):
+        tables = self.patients([
+            {"id": "A", "p_name": "Zander", "p_vname": "Eva", "p_birth": "1950-01-01"},
+            {"id": "B", "p_name": "Zander", "p_vname": "Eva", "p_birth": "1950-01-01"},
+            {"id": "C", "p_name": "Albers", "p_vname": "Tom", "p_birth": "1950-01-01", "p_vnr": "K123456789"},
+            {"id": "D", "p_name": "Brandt", "p_vname": "Tim", "p_birth": "1960-01-01", "p_vnr": "K123456789"},
+        ])
+        tables["events"] = pd.DataFrame({"id": ["E1", "E2"], "patient_id": ["B", "B"],
+                                         "start": ["2025-01-01 10:00:00", "2026-02-03 09:00:00"]})
+        d = pr.build_duplicates(tables)
+        self.assertEqual(d["Gruppe"].tolist(), [1, 1, 2, 2])
+        self.assertEqual(d["Übereinstimmung"].iloc[0], pr.DUP_RULE_EXACT)  # exakt vor VNR
+        b = d[d["Patienten-Nr"] == "B"].iloc[0]
+        self.assertEqual(b["Anzahl Termine"], 2)
+        self.assertEqual(b["Letzter Termin"], datetime.date(2026, 2, 3))
+
+    def test_no_duplicates_gives_empty_sheet_with_headers(self):
+        d = pr.build_duplicates(self.patients([
+            {"id": "A", "p_name": "Eins", "p_vname": "A", "p_birth": "1950-01-01"},
+        ]))
+        self.assertTrue(d.empty)
+        self.assertIn("Übereinstimmung", d.columns)
 
 
 class TestExportWorkbook(PatientRecordTestBase):

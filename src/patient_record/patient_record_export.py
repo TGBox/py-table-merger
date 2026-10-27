@@ -5,9 +5,11 @@ Die Logik ist bewusst GUI-frei (reine pandas-Funktionen), damit sie testbar blei
 Fehlende optionale Tabellen führen nicht zum Abbruch, das jeweilige Blatt entfällt.
 """
 import datetime
+import difflib
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -26,6 +28,7 @@ OPTIONAL_TABLES = [
 # Feste Blattnamen
 SHEET_OVERVIEW = "Übersicht"
 SHEET_PATIENTS = "Patienten"
+SHEET_DUPLICATES = "Mögliche Dubletten"
 SHEET_EVENTS = "Termine & Dokumentation"
 SHEET_PRESCRIPTIONS = "Verordnungen"
 SHEET_FINDINGS = "Befunde (Körperschema)"
@@ -53,6 +56,17 @@ _VIEW_PARTS = {
     "Muscle": "Muskulatur", "Skeleton": "Skelett",
     "Front": "vorne", "Back": "hinten",
 }
+
+# Dubletten-Regeln (Reihenfolge = Stärke; die stärkste Regel einer Gruppe steht vorne)
+DUP_RULE_EXACT = "Name, Vorname und Geburtsdatum gleich"
+DUP_RULE_SIMILAR = "Gleiches Geburtsdatum, ähnlicher Name"
+DUP_RULE_INSURANCE_NO = "Gleiche Versichertennummer"
+DUP_RULE_OTHER_BIRTH = "Name und Vorname gleich, anderes Geburtsdatum"
+DUP_RULES = [DUP_RULE_EXACT, DUP_RULE_SIMILAR, DUP_RULE_INSURANCE_NO, DUP_RULE_OTHER_BIRTH]
+# Mindest-Ähnlichkeit (0..1) des vollständigen Namens für DUP_RULE_SIMILAR
+NAME_SIMILARITY_THRESHOLD = 0.85
+# Mehr Patienten mit demselben Geburtsdatum deuten auf ein Platzhalter-Datum hin -> kein Ähnlichkeitsvergleich
+MAX_SIMILARITY_BLOCK = 200
 
 DATA_PROTECTION_NOTE = (
     "Diese Datei enthält personenbezogene Gesundheitsdaten (Art. 9 DSGVO). "
@@ -526,7 +540,10 @@ def build_sheets(tables: dict) -> dict:
     Blätter, deren Quelltabellen fehlen, werden ausgelassen."""
     ref = patient_reference(tables["patienten"])
     resolver = _RefResolver(tables)
-    sheets = {SHEET_PATIENTS: build_patients(tables)}
+    sheets = {
+        SHEET_PATIENTS: build_patients(tables),
+        SHEET_DUPLICATES: build_duplicates(tables, resolver),
+    }
     candidates = [
         (SHEET_EVENTS, build_events(tables, ref)),
         (SHEET_PRESCRIPTIONS, build_prescriptions(tables, ref)),
@@ -541,6 +558,175 @@ def build_sheets(tables: dict) -> dict:
         if df is not None:
             sheets[name] = df
     return sheets
+
+
+# --------------------------------------------------------------------------- #
+# Dubletten
+# --------------------------------------------------------------------------- #
+_NAME_TRANSLATION = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
+
+
+def normalize_name(value) -> str:
+    """Für den Vergleich: klein, Umlaute ausgeschrieben, Akzente entfernt, nur Buchstaben.
+    "Müller-Lüdenscheidt " -> "muellerluedenscheidt", "Ayşe" -> "ayse"."""
+    if pd.isna(value):
+        return ""
+    text = str(value).lower().translate(_NAME_TRANSLATION)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"[^a-z]", "", text)
+
+
+def normalize_insurance_no(value) -> str:
+    """Versichertennummer ohne Leer-/Trennzeichen; Platzhalter (z. B. 000000) zählen als leer."""
+    if pd.isna(value):
+        return ""
+    text = re.sub(r"[^0-9A-Za-z]", "", str(value)).upper()
+    if len(text) < 6 or len(set(text)) == 1:
+        return ""
+    return text
+
+
+def name_similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def find_duplicate_pairs(patients: pd.DataFrame) -> list:
+    """Liefert (Index_a, Index_b, Regel)-Paare möglicher Dubletten.
+
+    Gleichheits-Regeln werden als Kette verknüpft (A-B, B-C statt aller Paare), damit auch
+    viele gleichartige Datensätze (z. B. hunderte "Test, Test") linear bleiben. Der
+    Ähnlichkeitsvergleich läuft nur innerhalb eines Geburtsdatums; auffällig große Blöcke
+    (Platzhalter-Datum wie 01.01.1900) werden dabei übersprungen."""
+    last = _col(patients, "p_name").map(normalize_name)
+    first = _col(patients, "p_vname").map(normalize_name)
+    birth = _col(patients, "p_birth").fillna("").astype(str)
+    insurance_no = _col(patients, "p_vnr").map(normalize_insurance_no)
+    has_name = (last != "") & (first != "")
+    pairs = []
+
+    def chain(index, rule):
+        index = list(index)
+        pairs.extend((a, b, rule) for a, b in zip(index, index[1:]))
+
+    # 1 + 4: gleicher (normalisierter) Name und Vorname
+    names = pd.DataFrame({"l": last, "f": first, "b": birth})[has_name]
+    for _, group in names.groupby(["l", "f"], sort=False):
+        if len(group) < 2:
+            continue
+        representatives = []
+        for b_value, same_birth in group.groupby("b", sort=False):
+            if b_value:
+                chain(same_birth.index, DUP_RULE_EXACT)
+                representatives.append(same_birth.index[0])
+            else:  # ohne Geburtsdatum kann nur "anderes Geburtsdatum" gelten
+                representatives.extend(same_birth.index)
+        chain(representatives, DUP_RULE_OTHER_BIRTH)
+
+    # 2: gleiches Geburtsdatum, ähnlicher (nicht identischer) Name – auch Vor-/Nachname vertauscht
+    full = last + " " + first
+    swapped = first + " " + last
+    candidates = pd.DataFrame({"b": birth, "full": full})[(birth != "") & has_name]
+    for _, group in candidates.groupby("b", sort=False):
+        if len(group) < 2 or len(group) > MAX_SIMILARITY_BLOCK:
+            continue
+        unique_names = group.drop_duplicates("full").index.tolist()  # identische = schon Regel 1
+        for i, a in enumerate(unique_names):
+            for b in unique_names[i + 1:]:
+                score = max(name_similarity(full[a], full[b]), name_similarity(full[a], swapped[b]))
+                if score >= NAME_SIMILARITY_THRESHOLD:
+                    pairs.append((a, b, DUP_RULE_SIMILAR))
+
+    # 3: gleiche Versichertennummer
+    for _, group in pd.DataFrame({"v": insurance_no})[insurance_no != ""].groupby("v", sort=False):
+        if len(group) > 1:
+            chain(group.index, DUP_RULE_INSURANCE_NO)
+    return pairs
+
+
+def _group_pairs(pairs: list) -> list:
+    """Verbindet Paare zu Gruppen (A~B, B~C -> A,B,C). Gibt [(Mitglieder, Regeln)] zurück."""
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b, _ in pairs:
+        parent[find(a)] = find(b)
+    groups = {}
+    for a, b, rule in pairs:
+        members, rules = groups.setdefault(find(a), (set(), set()))
+        members.update((a, b))
+        rules.add(rule)
+    return list(groups.values())
+
+
+def build_duplicates(t, resolver=None) -> pd.DataFrame:
+    """Blatt "Mögliche Dubletten": eine Zeile je Patient, zusammengehörige Datensätze tragen
+    dieselbe Gruppen-Nr. Zusatzspalten (Termine, Verordnungen ...) helfen bei der Entscheidung,
+    welcher Datensatz behalten werden soll."""
+    p = t["patienten"].drop_duplicates("id").reset_index(drop=True)
+    columns = ["Gruppe", "Übereinstimmung"] + PATIENT_REF_COLS + [
+        "Anrede", "Anschrift", "Telefon", "Krankenkasse", "Versichertennummer", "Angelegt am",
+        "Anzahl Termine", "Letzter Termin", "Anzahl Verordnungen", "Anzahl Dokumente",
+    ]
+    groups = _group_pairs(find_duplicate_pairs(p))
+    if not groups:
+        return pd.DataFrame(columns=columns)
+
+    event_count, last_event, rx_count, file_count = {}, {}, {}, {}
+    if "events" in t:
+        e = t["events"].dropna(subset=["patient_id"])
+        event_count = e.groupby("patient_id")["id"].count().to_dict()
+        last_event = e.groupby("patient_id")["start"].max().to_dict() if "start" in e else {}
+    if "rezepte" in t:
+        rx_count = t["rezepte"].groupby("patienten_id")["id"].count().to_dict()
+    if "files" in t and resolver is not None:
+        pid, _ = resolver.apply(t["files"])
+        file_count = pid.dropna().value_counts().to_dict()
+
+    rule_rank = {rule: i for i, rule in enumerate(DUP_RULES)}
+    sort_name = _german_key(_col(p, "p_name")) + " " + _german_key(_col(p, "p_vname"))
+    ordered = sorted(
+        groups,
+        key=lambda g: (min(rule_rank[r] for r in g[1]), min(sort_name[i] for i in g[0])),
+    )
+
+    rows = []
+    for number, (members, rules) in enumerate(ordered, start=1):
+        reason = "; ".join(sorted(rules, key=rule_rank.get))
+        for i in sorted(members, key=lambda i: (sort_name[i], str(_col(p, "p_birth")[i]))):
+            r = p.loc[i]
+            pid = r["id"]
+            street = " ".join(str(x) for x in [r.get("p_street"), r.get("p_hausnummer")] if pd.notna(x))
+            city = " ".join(str(x) for x in [r.get("p_plz"), r.get("p_ort")] if pd.notna(x))
+            phone = r.get("p_tel") if pd.notna(r.get("p_tel")) else r.get("p_handy")
+            rows.append({
+                "Gruppe": number,
+                "Übereinstimmung": reason,
+                "Patienten-Nr": r.get("p_nr") if pd.notna(r.get("p_nr")) else pid,
+                "Nachname": r.get("p_name"),
+                "Vorname": r.get("p_vname"),
+                "Geburtsdatum": r.get("p_birth"),
+                "Anrede": r.get("p_anrede"),
+                "Anschrift": ", ".join(x for x in [street, city] if x) or None,
+                "Telefon": phone,
+                "Krankenkasse": r.get("p_krankenkasse"),
+                "Versichertennummer": r.get("p_vnr"),
+                "Angelegt am": r.get("erstellt_am"),
+                "Anzahl Termine": event_count.get(pid, 0),
+                "Letzter Termin": last_event.get(pid),
+                "Anzahl Verordnungen": rx_count.get(pid, 0),
+                "Anzahl Dokumente": file_count.get(pid, 0),
+            })
+    df = pd.DataFrame(rows, columns=columns)
+    for col in ("Geburtsdatum", "Angelegt am", "Letzter Termin"):
+        df[col] = to_date(df[col].astype(object))
+    return df
 
 
 def build_overview(sheets: dict, missing: list, source: str) -> pd.DataFrame:
