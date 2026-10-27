@@ -26,7 +26,8 @@ Dieses Tool wurde entwickelt, um **ohne SQL- oder Programmierkenntnisse** und **
 * **Interaktiver Umbenennen-Dialog:** Vor dem Speichern öffnet sich ein scrollbares Fenster, in dem alle gewählten Spalten manuell umbenannt werden können.
 * **Erweiterter Excel-Export:** Beim Speichern als `.xlsx` werden Spaltenbreiten automatisch an den Inhalt angepasst, lange Texte umgebrochen, Überschriften fett formatiert und ein Filter gesetzt.
 * **Text-sicheres Einlesen:** Alle Werte bleiben Text – führende Nullen (PLZ, Telefon, IDs) gehen nicht verloren. Kodierung (UTF-8 / Windows-1252) wird automatisch erkannt.
-* **Patientenakte:** Über den Button *„Patientenakte aus komplettem Export erstellen …“* wird aus dem Ordner mit **allen** CSV-Tabellen einer Instanz eine fertige Excel-Arbeitsmappe erzeugt (siehe unten).
+* **Patientenakte:** Über den Button *„Patientenakte erstellen …“* wird aus dem Ordner mit **allen** CSV-Tabellen einer Instanz eine fertige Excel-Arbeitsmappe erzeugt (siehe unten).
+* **Patientenübersicht:** Der Button *„Patientenübersicht (ohne IDs) erstellen …“* erzeugt eine schlanke Arbeitsmappe ganz ohne Datenbank-IDs (siehe unten).
 
 ---
 
@@ -38,6 +39,7 @@ Erzeugt ohne manuelles Verknüpfen eine Arbeitsmappe mit einem Blatt je Thema. J
 |---|---|
 | Übersicht | Erstellungszeitpunkt, Anzahl Einträge, Datenschutzhinweis |
 | Patienten | `patienten` |
+| Mögliche Dubletten | `patienten` (+ Termine/Verordnungen/Dokumente je Datensatz als Entscheidungshilfe) |
 | Termine & Dokumentation | `events`, `resources`, `rezepte_events`, `rezepte` |
 | Verordnungen | `rezepte`, `rezepte_events` |
 | Befunde (Körperschema) | `anatomy_patienten`, `anatomy` |
@@ -45,9 +47,32 @@ Erzeugt ohne manuelles Verknüpfen eine Arbeitsmappe mit einem Blatt je Thema. J
 | Notizen | `history` |
 | Dokumente | `files` (nur Liste – die Dateien selbst sind nicht enthalten) |
 
+**Dubletten-Regeln** (Namen normalisiert: Groß-/Kleinschreibung, Leer-/Bindestriche, Umlaute und Akzente egal). Zusammenhängende Treffer bilden eine Gruppe:
+1. Name, Vorname und Geburtsdatum gleich
+2. Gleiches Geburtsdatum, ähnlicher Name (Ähnlichkeit ≥ 85 %, auch vertauschte Vor-/Nachnamen)
+3. Gleiche Versichertennummer (Platzhalter wie `0000000000` werden ignoriert)
+4. Name und Vorname gleich, anderes Geburtsdatum
+
 Nur `patienten.csv` ist Pflicht; fehlt eine andere Tabelle, entfällt das betreffende Blatt.
 
 > ⚠️ Die Arbeitsmappe enthält Gesundheitsdaten (Art. 9 DSGVO) und darf nur verschlüsselt weitergegeben werden.
+
+---
+
+## 📋 Patientenübersicht (ohne IDs)
+
+Gleiche Quelle (Ordner mit allen CSV-Tabellen), aber nur drei Blätter und **keine Datenbank-IDs**. Patienten werden über eine **laufende Nr.** (1, 2, 3 … nach Name sortiert) referenziert, die nur innerhalb der Datei gilt:
+
+| Blatt | Inhalt |
+|---|---|
+| Übersicht | Erstellungszeitpunkt, Anzahl Einträge, Datenschutz- und Navigationshinweis |
+| Patienten | Lfd. Nr., persönliche Daten, Anschrift, Kontakt, Versicherung, Angelegt am, Letzter Termin, **Anzahl Termine / Verordnungen / Rechnungen** (ohne stornierte) |
+| Mögliche Dubletten | wie in der Patientenakte, mit Lfd. Nr. statt Patienten-Nr. |
+| Termine & Dokumentation | alle Termine je Patient mit lesbaren Eigenschaften und Dokumentation |
+
+Die Lfd. Nr. ist **anklickbar**: Patienten → erster Termin, Termine/Dubletten → Patientenzeile. Nach dem Umsortieren eines Blatts können Links auf falsche Zeilen zeigen; nach „Lfd. Nr.“ (und Datum) sortieren stellt die Ordnung wieder her.
+
+Technisch nutzen beide Exporte dieselbe Pipeline mit zwei Profilen (`PROFILE_RECORD`, `PROFILE_OVERVIEW` in `patient_record_export.py`). Idee und Abwägungen: [`docs/ideas/patientenuebersicht.md`](docs/ideas/patientenuebersicht.md).
 
 ---
 
@@ -61,7 +86,7 @@ py_table_merger/
 │   ├── constants.py            # Zentrale Design- und Konfigurationswerte
 │   ├── table_io.py             # Einlesen (CSV/Excel) und formatierter Excel-Export
 │   ├── patient_record/
-│   │   └── patient_record_export.py  # Export "Patientenakte"
+│   │   └── patient_record_export.py  # Exporte "Patientenakte" und "Patientenübersicht"
 │   └── table_merger/
 │       ├── __init__.py
 │       └── py_table_merger.py  # Hauptanwendung (GUI & Logik)

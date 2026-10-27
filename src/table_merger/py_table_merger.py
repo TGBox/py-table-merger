@@ -284,17 +284,31 @@ class TableMergerApp:
         )
         self.btn_merge.pack(fill="x", padx=15, pady=(15, 5))
 
-        # --- 4. PATIENTENAKTE (fester Export aus komplettem CSV-Export) ---
-        self.btn_patient_record = tk.Button(
-            root, text="Patientenakte aus komplettem Export erstellen …",
+        # --- 4. FESTE EXPORTE aus komplettem CSV-Export (nebeneinander) ---
+        self.frame_exports = tk.Frame(root)
+        self.frame_exports.pack(fill="x", padx=15, pady=(5, 15))
+        export_button_style = dict(
             bg="#5E5E5E", fg="#F7F7F7", font=("Roboto", 10, "bold"),
-            activebackground="#444444", activeforeground="#ffffff",
-            command=self.export_patient_record, relief="raised", pady=6
+            activebackground="#444444", activeforeground="#ffffff", relief="raised", pady=6
         )
-        self.btn_patient_record.pack(fill="x", padx=15, pady=(5, 15))
+        self.btn_patient_record = tk.Button(
+            self.frame_exports, text="Patientenakte erstellen …",
+            command=self.export_patient_record, **export_button_style
+        )
+        self.btn_patient_record.pack(side="left", fill="x", expand=True, padx=(0, 5))
         Tooltip(self.btn_patient_record, lambda: (
             "Erstellt aus dem Ordner mit ALLEN CSV-Tabellen einer Instanz eine Excel-Arbeitsmappe:\n"
-            "Patienten, Termine & Dokumentation, Verordnungen, Befunde, Fragebögen, Notizen, Dokumente."
+            "Patienten, Dubletten, Termine & Dokumentation, Verordnungen, Befunde, Fragebögen, Notizen, Dokumente."
+        ))
+        self.btn_patient_overview = tk.Button(
+            self.frame_exports, text="Patientenübersicht (ohne IDs) erstellen …",
+            command=self.export_patient_overview, **export_button_style
+        )
+        self.btn_patient_overview.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        Tooltip(self.btn_patient_overview, lambda: (
+            "Erstellt aus dem Ordner mit ALLEN CSV-Tabellen einer Instanz eine Excel-Arbeitsmappe OHNE Datenbank-IDs:\n"
+            "Patienten (mit Anzahl Termine/Verordnungen/Rechnungen), Dubletten, Termine & Dokumentation.\n"
+            "Die laufende Nr. verlinkt die Blätter untereinander."
         ))
         
         Tooltip(self.dropdown_join, self.get_current_tooltip_text)
@@ -516,8 +530,21 @@ class TableMergerApp:
             except Exception as e:
                 messagebox.showerror("Merge-Fehler", str(e))
 
-    # --- PATIENTENAKTE ---
+    # --- FESTE EXPORTE (Patientenakte / Patientenübersicht) ---
     def export_patient_record(self):
+        self._export_from_folder(
+            patient_record_export.PROFILE_RECORD,
+            lambda folder, path: patient_record_export.export_patient_record(folder, path),
+        )
+
+    def export_patient_overview(self):
+        self._export_from_folder(
+            patient_record_export.PROFILE_OVERVIEW,
+            lambda folder, path: patient_record_export.export_patient_overview(folder, path),
+        )
+
+    def _export_from_folder(self, profile, export_func):
+        """Gemeinsamer Ablauf: Export-Ordner wählen -> Speicherort -> Export -> Ergebnis melden."""
         folder = filedialog.askdirectory(title="Ordner mit dem kompletten CSV-Export wählen")
         if not folder:
             return
@@ -532,8 +559,8 @@ class TableMergerApp:
         save_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel-Arbeitsmappe", ".xlsx")],
-            initialfile=f"Patientenakte_{datetime.date.today():%Y-%m-%d}.xlsx",
-            title="Patientenakte speichern unter..."
+            initialfile=f"{profile.file_prefix}_{datetime.date.today():%Y-%m-%d}.xlsx",
+            title=f"{profile.title} speichern unter..."
         )
         if not save_path:
             return
@@ -541,7 +568,7 @@ class TableMergerApp:
         self.root.config(cursor="watch")
         self.root.update_idletasks()
         try:
-            result = patient_record_export.export_patient_record(folder, save_path)
+            result = export_func(folder, save_path)
         except PermissionError:
             messagebox.showerror(
                 "Speichern nicht möglich",
@@ -550,17 +577,17 @@ class TableMergerApp:
             )
             return
         except Exception as e:
-            messagebox.showerror("Export-Fehler", f"Die Patientenakte konnte nicht erstellt werden:\n{e}")
+            messagebox.showerror("Export-Fehler", f"{profile.title} konnte nicht erstellt werden:\n{e}")
             return
         finally:
             self.root.config(cursor="")
 
         lines = [f"• {name}: {count} Einträge" for name, count in result.sheet_counts.items()]
         if result.missing_tables:
-            lines.append("\nNicht im Export enthalten (Blätter entfallen ggf.):\n"
+            lines.append("\nNicht im Export enthalten (Blätter/Spalten entfallen ggf.):\n"
                          + ", ".join(f"{t}.csv" for t in result.missing_tables))
         messagebox.showinfo(
-            "Patientenakte erstellt",
+            f"{profile.title} erstellt",
             f"Gespeichert unter:\n{save_path}\n\n" + "\n".join(lines)
             + "\n\nHinweis: Die Datei enthält Gesundheitsdaten – nur verschlüsselt weitergeben."
         )

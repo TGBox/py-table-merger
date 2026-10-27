@@ -312,6 +312,118 @@ class TestDuplicates(unittest.TestCase):
         self.assertIn("Übereinstimmung", d.columns)
 
 
+class TestPatientOverview(PatientRecordTestBase):
+    """Profil "Patientenübersicht": keine Datenbank-IDs, laufende Nr., Zählungen, interne Links."""
+
+    def setUp(self):
+        super().setUp()
+        write_csv(self.folder, "rechnung", [
+            {"id": "RG1", "patienten_id": "P1", "status": "Bezahlt", "storniert_am": None},
+            {"id": "RG2", "patienten_id": "P1", "status": "Offen", "storniert_am": None},
+            {"id": "RG3", "patienten_id": "P1", "status": "Storniert", "storniert_am": "2025-07-18"},
+            {"id": "RG4", "patienten_id": "P2", "status": "Gemahnt: 05.10.2026", "storniert_am": None},
+        ])
+        # Termin eines unbekannten Patienten und Termin mit unbekanntem Therapeuten
+        path = os.path.join(self.folder, "events.csv")
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        content += ('"E4";"2026-02-01 09:00:00";"2026-02-01 09:20:00";"20";"KG";"R-UNBEKANNT";"P-GELOESCHT";'
+                    '"1";NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL\n')
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def overview_sheets(self):
+        tables, _ = pr.load_export_folder(self.folder)
+        return pr.build_sheets(tables, pr.PROFILE_OVERVIEW)
+
+    def all_ids(self):
+        """Alle Datenbank-IDs aus allen Tabellen des Test-Exports."""
+        tables, _ = pr.load_export_folder(self.folder)
+        ids = set()
+        for df in tables.values():
+            for col in df.columns:
+                if col in ("id", "p_nr", "refid", "resource", "id_patient", "id_region") or col.endswith("_id"):
+                    ids |= set(df[col].dropna().astype(str))
+        return ids
+
+    def test_sheets(self):
+        self.assertEqual(list(self.overview_sheets()),
+                         [pr.SHEET_PATIENT_OVERVIEW, pr.SHEET_DUPLICATES, pr.SHEET_EVENTS])
+
+    def test_patient_list_running_number_and_counts(self):
+        p = self.overview_sheets()[pr.SHEET_PATIENT_OVERVIEW]
+        self.assertNotIn(pr.ID_COL, p.columns)
+        self.assertEqual(p.columns[:3].tolist(), [pr.RUNNING_NO_COL, "Anrede", "Nachname"])
+        self.assertEqual(p[pr.RUNNING_NO_COL].tolist(), [1, 2])
+        self.assertEqual(p["Nachname"].tolist(), ["Adam", "Öztürk"])
+        oez = p.iloc[1]
+        self.assertEqual(oez["Anzahl Termine"], 2)
+        self.assertEqual(oez["Anzahl Verordnungen"], 1)
+        self.assertEqual(oez["Anzahl Rechnungen"], 2)  # Storno zählt nicht
+        self.assertEqual(oez["Letzter Termin"], datetime.date(2026, 1, 5))
+        self.assertEqual(oez["PLZ"], "01067")
+        self.assertEqual(p.iloc[0]["Anzahl Rechnungen"], 1)  # "Gemahnt" zählt
+
+    def test_events_without_ids(self):
+        e = self.overview_sheets()[pr.SHEET_EVENTS]
+        self.assertNotIn(pr.ID_COL, e.columns)
+        unknown = e[e["Nachname"] == pr.UNKNOWN_PATIENT].iloc[0]
+        self.assertTrue(pd.isna(unknown[pr.RUNNING_NO_COL]))
+        self.assertTrue(pd.isna(unknown["Therapeut"]))  # keine Ressourcen-ID als Ersatz
+        known = e[e["Nachname"] == "Öztürk"]
+        self.assertEqual(known[pr.RUNNING_NO_COL].tolist(), [2, 2])
+
+    def test_duplicates_use_running_number(self):
+        tables, _ = pr.load_export_folder(self.folder)
+        tables["patienten"] = pd.concat([tables["patienten"], tables["patienten"].iloc[[0]].assign(id="P1b", p_nr="P1b")],
+                                        ignore_index=True)
+        d = pr.build_sheets(tables, pr.PROFILE_OVERVIEW)[pr.SHEET_DUPLICATES]
+        self.assertNotIn(pr.ID_COL, d.columns)
+        self.assertEqual(sorted(d[pr.RUNNING_NO_COL].tolist()), [2, 3])
+
+    def test_workbook_contains_no_database_ids(self):
+        import openpyxl
+        out = os.path.join(self.folder, "uebersicht.xlsx")
+        pr.export_patient_overview(self.folder, out)
+        ids = self.all_ids()
+        wb = openpyxl.load_workbook(out)
+        leaks = [(ws.title, c.coordinate, c.value) for ws in wb.worksheets for row in ws.iter_rows()
+                 for c in row if c.value is not None and str(c.value) in ids]
+        self.assertEqual(leaks, [])
+
+    def test_links(self):
+        import openpyxl
+        out = os.path.join(self.folder, "uebersicht.xlsx")
+        pr.export_patient_overview(self.folder, out)
+        wb = openpyxl.load_workbook(out)
+        patients, events = wb[pr.SHEET_PATIENT_OVERVIEW], wb[pr.SHEET_EVENTS]
+        # Adam (Nr. 1) hat keine Termine -> kein Link; Öztürk (Nr. 2) -> erster Termin
+        self.assertEqual(patients["A2"].value, 1)
+        first_event_row = next(r for r in range(2, events.max_row + 1)
+                               if events.cell(r, 2).value == "Öztürk")
+        self.assertEqual(patients["A3"].value,
+                         f'=HYPERLINK("#\'{pr.SHEET_EVENTS}\'!A{first_event_row}",2)')
+        # Rücksprung Termine -> Patientenzeile
+        self.assertEqual(events.cell(first_event_row, 1).value,
+                         f'=HYPERLINK("#\'{pr.SHEET_PATIENT_OVERVIEW}\'!A3",2)')
+        notes = [c.value for c in wb[pr.SHEET_OVERVIEW]["A"]]
+        self.assertIn("Navigation", notes)
+
+    def test_missing_invoices_only_reported_for_overview(self):
+        os.remove(os.path.join(self.folder, "rechnung.csv"))
+        out = os.path.join(self.folder, "x.xlsx")
+        self.assertIn("rechnung", pr.export_patient_overview(self.folder, out).missing_tables)
+        self.assertNotIn("rechnung", pr.export_patient_record(self.folder, out).missing_tables)
+        p = self.overview_sheets()[pr.SHEET_PATIENT_OVERVIEW]
+        self.assertEqual(p["Anzahl Rechnungen"].tolist(), [0, 0])
+
+    def test_record_profile_still_uses_patient_numbers(self):
+        tables, _ = pr.load_export_folder(self.folder)
+        e = pr.build_sheets(tables)[pr.SHEET_EVENTS]
+        self.assertIn(pr.ID_COL, e.columns)
+        self.assertIn("P-GELOESCHT", e[pr.ID_COL].tolist())  # Akte: rohe ID für Unbekannte
+
+
 class TestExportWorkbook(PatientRecordTestBase):
     def test_export_writes_readable_workbook(self):
         out = os.path.join(self.folder, "akte.xlsx")
