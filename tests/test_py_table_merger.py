@@ -277,5 +277,34 @@ class TestTableMergerApp(unittest.TestCase):
             if os.path.exists(save_path):
                 os.remove(save_path)
 
+    @patch("tkinter.messagebox.showinfo")
+    @patch("tkinter.filedialog.asksaveasfilename", return_value="akte.xlsx")
+    @patch("tkinter.filedialog.askdirectory")
+    def test_patient_record_button_flow(self, mock_dir, mock_save, mock_info):
+        """Button "Patientenakte": Ordner + Speicherort wählen -> Export wird mit beiden Pfaden aufgerufen."""
+        import tempfile
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "Patienten.csv"), "w").close()  # Groß-/Kleinschreibung egal
+        mock_dir.return_value = folder
+        fake_result = MagicMock(sheet_counts={"Patienten": 3}, missing_tables=["files"])
+        with patch("table_merger.py_table_merger.patient_record_export.export_patient_record",
+                   return_value=fake_result) as mock_export:
+            self.app.export_patient_record()
+        mock_export.assert_called_once_with(folder, "akte.xlsx")
+        message = mock_info.call_args[0][1]
+        self.assertIn("Patienten: 3 Einträge", message)
+        self.assertIn("files.csv", message)
+
+    @patch("tkinter.messagebox.showwarning")
+    @patch("tkinter.filedialog.asksaveasfilename")
+    @patch("tkinter.filedialog.askdirectory")
+    def test_patient_record_wrong_folder(self, mock_dir, mock_save, mock_warn):
+        """Ordner ohne patienten.csv -> Hinweis, kein Speichern-Dialog."""
+        import tempfile
+        mock_dir.return_value = tempfile.mkdtemp()
+        self.app.export_patient_record()
+        mock_warn.assert_called_once()
+        mock_save.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,7 +41,30 @@ Dieses Tool wurde entwickelt, um **ohne SQL- oder Programmierkenntnisse** und **
 * **Flexible Join-Typen:** Unterstützt *Left Join*, *Right Join*, *Inner Join* und *Outer Join* inklusive Live-Erklärung in der Oberfläche.
 * **Drag-and-Drop Sortierung:** Die finale Export-Reihenfolge der Spalten kann per Maus verschoben werden.
 * **Interaktiver Umbenennen-Dialog:** Vor dem Speichern öffnet sich ein scrollbares Fenster, in dem alle gewählten Spalten manuell umbenannt werden können.
-* **Erweiterter Excel-Export:** Beim Speichern als `.xlsx` werden Spaltenbreiten automatisch an den Inhalt angepasst und Überschriften fett formatiert.
+* **Erweiterter Excel-Export:** Beim Speichern als `.xlsx` werden Spaltenbreiten automatisch an den Inhalt angepasst, lange Texte umgebrochen, Überschriften fett formatiert und ein Filter gesetzt.
+* **Text-sicheres Einlesen:** Alle Werte bleiben Text – führende Nullen (PLZ, Telefon, IDs) gehen nicht verloren. Kodierung (UTF-8 / Windows-1252) wird automatisch erkannt.
+* **Patientenakte:** Über den Button *„Patientenakte aus komplettem Export erstellen …“* wird aus dem Ordner mit **allen** CSV-Tabellen einer Instanz eine fertige Excel-Arbeitsmappe erzeugt (siehe unten).
+
+---
+
+## 🗂️ Patientenakte-Export
+
+Erzeugt ohne manuelles Verknüpfen eine Arbeitsmappe mit einem Blatt je Thema. Jedes Blatt beginnt mit *Patienten-Nr, Nachname, Vorname, Geburtsdatum* und ist nach Patient sortiert:
+
+| Blatt | Quelle(n) |
+|---|---|
+| Übersicht | Erstellungszeitpunkt, Anzahl Einträge, Datenschutzhinweis |
+| Patienten | `patienten` |
+| Termine & Dokumentation | `events`, `resources`, `rezepte_events`, `rezepte` |
+| Verordnungen | `rezepte`, `rezepte_events` |
+| Befunde (Körperschema) | `anatomy_patienten`, `anatomy` |
+| Fragebogen &lt;Name&gt; | `kartei_history`, `kartei_content`, `pat_property`, `kartei` (eine Spalte je Frage) |
+| Notizen | `history` |
+| Dokumente | `files` (nur Liste – die Dateien selbst sind nicht enthalten) |
+
+Nur `patienten.csv` ist Pflicht; fehlt eine andere Tabelle, entfällt das betreffende Blatt.
+
+> ⚠️ Die Arbeitsmappe enthält Gesundheitsdaten (Art. 9 DSGVO) und darf nur verschlüsselt weitergegeben werden.
 
 ---
 
@@ -53,9 +76,13 @@ Das Projekt ist modular nach modernen Python-Standards aufgebaut:
 py_table_merger/
 ├── src/
 │   ├── constants.py            # Zentrale Design- und Konfigurationswerte
+│   ├── table_io.py             # Einlesen (CSV/Excel) und formatierter Excel-Export
+│   ├── patient_record/
+│   │   └── patient_record_export.py  # Export "Patientenakte"
 │   └── table_merger/
 │       ├── __init__.py
 │       └── py_table_merger.py  # Hauptanwendung (GUI & Logik)
 ├── tests/
-│   └── test_py_table_merger.py # Automatisierte Testsuite
+│   ├── test_py_table_merger.py      # Tests Merger-GUI & Merge-Logik
+│   └── test_patient_record_export.py # Tests Patientenakte
 └── README.md                   # Projektdokumentation

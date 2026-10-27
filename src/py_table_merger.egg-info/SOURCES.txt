@@ -1,6 +1,8 @@
 LICENCE
 README.md
 pyproject.toml
+src/patient_record/__init__.py
+src/patient_record/patient_record_export.py
 src/py_table_merger.egg-info/PKG-INFO
 src/py_table_merger.egg-info/SOURCES.txt
 src/py_table_merger.egg-info/dependency_links.txt
@@ -9,4 +11,5 @@ src/py_table_merger.egg-info/top_level.txt
 src/table_filler/py_table_filler.py
 src/table_merger/__init__.py
 src/table_merger/py_table_merger.py
+tests/test_patient_record_export.py
 tests/test_py_table_merger.py

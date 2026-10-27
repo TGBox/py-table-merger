@@ -10,10 +10,13 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import pandas as pd
 import src.constants as constants
+import src.table_io as table_io
+from src.patient_record import patient_record_export
 
 class RenameColumnsDialog(tk.Toplevel):
     def __init__(self, parent, columns):
@@ -279,7 +282,20 @@ class TableMergerApp:
             activebackground=constants.CONFIRM_BTN_ACTIVE_BG_COL, activeforeground=constants.CONFIRM_BTN_ACTIVE_FG_COL,
             command=self.perform_merge, relief="raised", pady=8
         )
-        self.btn_merge.pack(fill="x", padx=15, pady=15)
+        self.btn_merge.pack(fill="x", padx=15, pady=(15, 5))
+
+        # --- 4. PATIENTENAKTE (fester Export aus komplettem CSV-Export) ---
+        self.btn_patient_record = tk.Button(
+            root, text="Patientenakte aus komplettem Export erstellen …",
+            bg="#5E5E5E", fg="#F7F7F7", font=("Roboto", 10, "bold"),
+            activebackground="#444444", activeforeground="#ffffff",
+            command=self.export_patient_record, relief="raised", pady=6
+        )
+        self.btn_patient_record.pack(fill="x", padx=15, pady=(5, 15))
+        Tooltip(self.btn_patient_record, lambda: (
+            "Erstellt aus dem Ordner mit ALLEN CSV-Tabellen einer Instanz eine Excel-Arbeitsmappe:\n"
+            "Patienten, Termine & Dokumentation, Verordnungen, Befunde, Fragebögen, Notizen, Dokumente."
+        ))
         
         Tooltip(self.dropdown_join, self.get_current_tooltip_text)
         self.update_join_info()
@@ -358,40 +374,9 @@ class TableMergerApp:
             self.listbox_right.itemconfig(index, bg=constants.PRIM_KEY_SELECT_BG_COL, fg="black")
 
     # --- DATEN EINLESEN ---
-    # Nur diese Werte gelten als "leer". Bewusst NICHT die Pandas-Standardliste,
-    # sonst würden z. B. Einträge wie "NA" oder "null" ebenfalls verschwinden.
-    NA_VALUES = ["NULL", ""]
-    # Reihenfolge der Encoding-Versuche (latin-1 kann jede Bytefolge lesen = letzter Fallback).
-    CSV_ENCODINGS = ["utf-8-sig", "cp1252", "latin-1"]
-
-    @classmethod
-    def detect_encoding(cls, filepath: str) -> str:
-        with open(filepath, "rb") as f:
-            raw = f.read()
-        for encoding in cls.CSV_ENCODINGS:
-            try:
-                raw.decode(encoding)
-                return encoding
-            except UnicodeDecodeError:
-                continue
-        return cls.CSV_ENCODINGS[-1]
-
     def read_file(self, filepath: str):
-        """Liest CSV/Excel ein. Alle Werte bleiben Text (dtype=str), damit führende
-        Nullen (PLZ, Telefon, IDs) erhalten bleiben und Schlüssel immer vergleichbar sind."""
-        ext = os.path.splitext(filepath)[1].lower()
-        read_opts = dict(dtype=str, keep_default_na=False, na_values=self.NA_VALUES)
-        if ext == ".csv":
-            encoding = self.detect_encoding(filepath)
-            for sep in [";", ",", "\t"]:
-                try:
-                    df = pd.read_csv(filepath, sep=sep, encoding=encoding, **read_opts)
-                    if len(df.columns) > 1: return df
-                except Exception: continue
-            return pd.read_csv(filepath, encoding=encoding, **read_opts)
-        elif ext in [".xlsx", ".xls"]:
-            return pd.read_excel(filepath, **read_opts)
-        raise ValueError("Ungültiges Dateiformat.")
+        """Liest CSV/Excel ein (alle Werte als Text, Encoding-Erkennung) – siehe table_io.read_table."""
+        return table_io.read_table(filepath)
 
     def load_left(self):
         file_path = filedialog.askopenfilename(filetypes=[("Tabellendaten", "*.csv *.xlsx *.xls")])
@@ -424,8 +409,6 @@ class TableMergerApp:
     # --- MERGE PROCESS ---
     # Interne Präfixe, damit beim Merge nie Namenskonflikte (und damit _x/_y-Suffixe) entstehen.
     LEFT_PREFIX = "__L__"
-    # Maximale Spaltenbreite im Excel-Export (Zeichen); längere Inhalte werden umgebrochen.
-    MAX_EXCEL_COL_WIDTH = 80
     RIGHT_PREFIX = "__R__"
 
     @classmethod
@@ -521,57 +504,10 @@ class TableMergerApp:
 
                 # 3. Speichern
                 if save_path.endswith(".xlsx"):
-                    # Wir nutzen den XlsxWriter für erweitertes Styling
-                    writer = pd.ExcelWriter(save_path, engine="xlsxwriter")
-                    df_result.to_excel(writer, index=False, sheet_name="Merge_Ergebnis")
-                    
-                    # Workbook und Worksheet-Objekte von xlsxwriter abgreifen
-                    workbook  = writer.book
-                    worksheet = writer.sheets["Merge_Ergebnis"]
-                    
-                    # Ein Format für die fettgedruckten Überschriften definieren
-                    header_format = workbook.add_format({
-                        'bold': True,
-                        'text_wrap': False, # Verhindert ungewollte Zeilenumbrüche in der Zeile
-                        'valign': 'top'
-                    })
-                    
-                    # Lange Texte (z. B. Dokumentation) umbrechen statt die Spalte endlos breit zu machen
-                    wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+                    # Formatierter Export (fette Überschriften, Spaltenbreiten, Filter) – siehe table_io
+                    with pd.ExcelWriter(save_path, engine="xlsxwriter") as writer:
+                        table_io.write_excel_sheet(writer, df_result, "Merge_Ergebnis")
 
-                    # Werte werden als Text eingelesen (führende Nullen!) -> grüne Excel-Dreiecke unterdrücken
-                    worksheet.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
-
-                    # Überschriften fett schreiben UND Spaltenbreiten automatisch anpassen
-                    for col_num, col_name in enumerate(df_result.columns.values):
-                        # 1. Überschrift fett formatieren
-                        worksheet.write(0, col_num, col_name, header_format)
-                        
-                        # 2. Maximale Länge der Inhalte in dieser Spalte ermitteln
-                        # Wir prüfen die Länge des Spaltennamens selbst...
-                        max_len = len(str(col_name))
-                        
-                        # ...und vergleichen sie mit der Länge des längsten Eintrags in den Daten
-                        column_data = df_result.iloc[:, col_num].dropna()
-                        if not column_data.empty:
-                            max_data_len = int(column_data.astype(str).str.len().max())
-                            max_len = max(max_len, max_data_len)
-                        
-                        # Ein bisschen Puffer (z. B. + 3 Zeichen) hinzufügen, damit es nicht zu gequetscht wirkt
-                        col_width = max_len + 3
-                        
-                        # Mindestbreite festlegen (falls der Inhalt sehr kurz ist, z. B. bei IDs)
-                        col_width = max(col_width, 10)
-                        
-                        # Spaltenbreite im Excel-Sheet setzen (gedeckelt, darüber Zeilenumbruch)
-                        if col_width > self.MAX_EXCEL_COL_WIDTH:
-                            worksheet.set_column(col_num, col_num, self.MAX_EXCEL_COL_WIDTH, wrap_format)
-                        else:
-                            worksheet.set_column(col_num, col_num, col_width)
-                    
-                    # Wichtig: Speichern und Schließen des Writers
-                    writer.close()
-                    
                 else:
                     # CSV unterstützt prinzipiell keine Formatierungen wie Spaltenbreiten oder "Fett"
                     df_result.to_csv(save_path, index=False, sep=";")
@@ -579,6 +515,56 @@ class TableMergerApp:
                 messagebox.showinfo("Speichern erfolgreich", f"Die neue Tabelle wurde erfolgreich unter \"{save_path}\" abgespeichert.")
             except Exception as e:
                 messagebox.showerror("Merge-Fehler", str(e))
+
+    # --- PATIENTENAKTE ---
+    def export_patient_record(self):
+        folder = filedialog.askdirectory(title="Ordner mit dem kompletten CSV-Export wählen")
+        if not folder:
+            return
+        if patient_record_export.find_table_file(folder, patient_record_export.REQUIRED_TABLE) is None:
+            messagebox.showwarning(
+                "Falscher Ordner",
+                "Im gewählten Ordner wurde keine Datei \"patienten.csv\" gefunden.\n\n"
+                "Bitte den Ordner wählen, der alle CSV-Tabellen des Exports enthält."
+            )
+            return
+
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel-Arbeitsmappe", ".xlsx")],
+            initialfile=f"Patientenakte_{datetime.date.today():%Y-%m-%d}.xlsx",
+            title="Patientenakte speichern unter..."
+        )
+        if not save_path:
+            return
+
+        self.root.config(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            result = patient_record_export.export_patient_record(folder, save_path)
+        except PermissionError:
+            messagebox.showerror(
+                "Speichern nicht möglich",
+                f"Die Datei \"{save_path}\" konnte nicht geschrieben werden.\n"
+                "Ist sie vielleicht noch in Excel geöffnet?"
+            )
+            return
+        except Exception as e:
+            messagebox.showerror("Export-Fehler", f"Die Patientenakte konnte nicht erstellt werden:\n{e}")
+            return
+        finally:
+            self.root.config(cursor="")
+
+        lines = [f"• {name}: {count} Einträge" for name, count in result.sheet_counts.items()]
+        if result.missing_tables:
+            lines.append("\nNicht im Export enthalten (Blätter entfallen ggf.):\n"
+                         + ", ".join(f"{t}.csv" for t in result.missing_tables))
+        messagebox.showinfo(
+            "Patientenakte erstellt",
+            f"Gespeichert unter:\n{save_path}\n\n" + "\n".join(lines)
+            + "\n\nHinweis: Die Datei enthält Gesundheitsdaten – nur verschlüsselt weitergeben."
+        )
+
 
 if __name__ == "__main__":
     root = tk.Tk()
