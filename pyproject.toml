@@ -18,8 +18,9 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.28.0",
-    "tkinter",
-    "pandas"
+    "pandas",
+    "openpyxl",
+    "xlsxwriter"
 ]
 
 [tool.setuptools.packages.find]

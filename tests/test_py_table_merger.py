@@ -148,5 +148,134 @@ class TestTableMergerApp(unittest.TestCase):
             if os.path.exists(save_path):
                 os.remove(save_path)
 
+    def test_read_file_keeps_text_values(self):
+        """PLZ/Telefon mit führender Null bleiben Text, NULL wird leer, andere Werte bleiben erhalten."""
+        temp_csv = "temp_text.csv"
+        with open(temp_csv, "w", encoding="utf-8") as f:
+            f.write('id;plz;tel;ik;name\n"00042";"01067";"01729239280";NULL;"NA"\n"00043";"21442";NULL;"103411401";"Müller"\n')
+        try:
+            df = self.app.read_file(temp_csv)
+            self.assertEqual(df.loc[0, "id"], "00042")
+            self.assertEqual(df.loc[0, "plz"], "01067")
+            self.assertEqual(df.loc[0, "tel"], "01729239280")
+            self.assertEqual(df.loc[1, "ik"], "103411401")
+            self.assertTrue(pd.isna(df.loc[0, "ik"]))
+            self.assertEqual(df.loc[0, "name"], "NA")
+        finally:
+            os.remove(temp_csv)
+
+    def test_read_file_cp1252(self):
+        """Exporte in Windows-Kodierung (cp1252) werden korrekt eingelesen."""
+        temp_csv = "temp_cp1252.csv"
+        with open(temp_csv, "w", encoding="cp1252") as f:
+            f.write("id;name\n1;Stödter\n2;Weiß\n")
+        try:
+            df = self.app.read_file(temp_csv)
+            self.assertEqual(df["name"].tolist(), ["Stödter", "Weiß"])
+        finally:
+            os.remove(temp_csv)
+
+    def test_export_item_to_internal(self):
+        """Anzeigenamen der Export-Liste werden der richtigen Tabellenseite zugeordnet."""
+        f = TableMergerApp.export_item_to_internal
+        self.assertEqual(f("Alter (Links)", ["Alter"]), TableMergerApp.LEFT_PREFIX + "Alter")
+        self.assertEqual(f("Alter (Rechts)", ["Alter"]), TableMergerApp.RIGHT_PREFIX + "Alter")
+        self.assertEqual(f("Name", ["Name"]), TableMergerApp.LEFT_PREFIX + "Name")
+        self.assertEqual(f("Stadt", ["Name"]), TableMergerApp.RIGHT_PREFIX + "Stadt")
+
+    def _run_merge(self, left, right, key_left, key_right, sel_left, sel_right, export_items):
+        """Hilfsfunktion: führt perform_merge mit gemockten Dialogen aus und liefert das CSV-Ergebnis."""
+        self.app.df_left, self.app.df_right = left, right
+        self.app.key_left, self.app.key_right = key_left, key_right
+        self.app.listbox_left.insert(tk.END, *left.columns)
+        self.app.listbox_right.insert(tk.END, *right.columns)
+        for c in sel_left:
+            self.app.listbox_left.selection_set(list(left.columns).index(c))
+        for c in sel_right:
+            self.app.listbox_right.selection_set(list(right.columns).index(c))
+        self.app.listbox_export.insert(tk.END, *export_items)
+        save_path = "test_output_merge.csv"
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=save_path), \
+             patch("tkinter.messagebox.showinfo"), \
+             patch("table_merger.py_table_merger.RenameColumnsDialog") as dlg:
+            dlg.side_effect = lambda parent, cols: MagicMock(result={c: c for c in cols})
+            self.app.perform_merge()
+        try:
+            return pd.read_csv(save_path, sep=";", dtype=str)
+        finally:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+
+    def test_merge_same_column_name_selected_only_left(self):
+        """Regression: 'id' existiert in beiden Tabellen, wird aber nur links gewählt -> darf nicht verschwinden."""
+        patienten = pd.DataFrame({"id": ["P1", "P2"], "name": ["Muster", "Test"]})
+        termine = pd.DataFrame({"id": ["T1", "T2", "T3"], "patient_id": ["P1", "P1", "P2"], "start": ["a", "b", "c"]})
+        df = self._run_merge(termine, patienten, "patient_id", "id",
+                             sel_left=["start"], sel_right=["id", "name"],
+                             export_items=["id", "name", "start"])
+        self.assertEqual(list(df.columns), ["id", "name", "start"])
+        self.assertEqual(df["id"].tolist(), ["P1", "P1", "P2"])
+
+    def test_merge_key_name_collides_with_selected_column(self):
+        """Regression: rechter Schlüssel heißt wie eine links gewählte Spalte, ist rechts aber nicht gewählt."""
+        left = pd.DataFrame({"patient_id": ["P1", "P2"], "wert": ["x", "y"]})
+        right = pd.DataFrame({"pid": ["P1", "P2"], "patient_id": ["A", "B"], "name": ["Muster", "Test"]})
+        df = self._run_merge(left, right, "patient_id", "pid",
+                             sel_left=["patient_id", "wert"], sel_right=["name"],
+                             export_items=["patient_id", "wert", "name"])
+        self.assertEqual(list(df.columns), ["patient_id", "wert", "name"])
+        self.assertEqual(df["patient_id"].tolist(), ["P1", "P2"])
+
+    def test_merge_same_column_selected_both_sides(self):
+        """Gleichnamige Spalte auf beiden Seiten gewählt -> beide mit (Links)/(Rechts) im Export."""
+        df = self._run_merge(self.test_df_left, self.test_df_right, "ID", "KundenID",
+                             sel_left=["ID", "Alter"], sel_right=["Alter"],
+                             export_items=["ID", "Alter (Links)", "Alter (Rechts)"])
+        self.assertEqual(list(df.columns), ["ID", "Alter (Links)", "Alter (Rechts)"])
+        self.assertEqual(df.loc[1, "Alter (Rechts)"], "99")
+
+    @patch("tkinter.messagebox.showwarning")
+    @patch("tkinter.filedialog.asksaveasfilename", return_value="test_dup.csv")
+    @patch("table_merger.py_table_merger.RenameColumnsDialog")
+    def test_merge_rejects_duplicate_names_after_rename(self, mock_dlg, mock_save, mock_warn):
+        """Doppelte Namen im Umbenennen-Dialog führen zu einer Warnung statt zu einer kaputten Datei."""
+        self.app.df_left, self.app.df_right = self.test_df_left, self.test_df_right
+        self.app.key_left, self.app.key_right = "ID", "KundenID"
+        self.app.listbox_left.insert(tk.END, "ID", "Name", "Alter")
+        self.app.listbox_right.insert(tk.END, "KundenID", "Stadt", "Alter")
+        self.app.listbox_left.selection_set(1)
+        self.app.listbox_right.selection_set(1)
+        self.app.listbox_export.insert(tk.END, "Name", "Stadt")
+        mock_dlg.return_value = MagicMock(result={"Name": "X", "Stadt": "X"})
+        self.app.perform_merge()
+        mock_warn.assert_called_once()
+        self.assertFalse(os.path.exists("test_dup.csv"))
+
+    def test_excel_export_long_text(self):
+        """Excel-Export mit langen Texten (Dokumentation) und Text-Zahlen läuft fehlerfrei durch."""
+        left = pd.DataFrame({"id": ["P1"], "plz": ["01067"]})
+        right = pd.DataFrame({"pid": ["P1"], "doku": ["x" * 2000]})
+        self.app.df_left, self.app.df_right = left, right
+        self.app.key_left, self.app.key_right = "id", "pid"
+        self.app.listbox_left.insert(tk.END, "id", "plz")
+        self.app.listbox_right.insert(tk.END, "pid", "doku")
+        self.app.listbox_left.selection_set(1)
+        self.app.listbox_right.selection_set(1)
+        self.app.listbox_export.insert(tk.END, "plz", "doku")
+        save_path = "test_output.xlsx"
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=save_path), \
+             patch("tkinter.messagebox.showinfo"), patch("tkinter.messagebox.showerror") as err, \
+             patch("table_merger.py_table_merger.RenameColumnsDialog") as dlg:
+            dlg.side_effect = lambda parent, cols: MagicMock(result={c: c for c in cols})
+            self.app.perform_merge()
+        try:
+            err.assert_not_called()
+            df = pd.read_excel(save_path, dtype=str)
+            self.assertEqual(df.loc[0, "plz"], "01067")
+            self.assertEqual(len(df.loc[0, "doku"]), 2000)
+        finally:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+
 if __name__ == "__main__":
     unittest.main()

@@ -358,17 +358,39 @@ class TableMergerApp:
             self.listbox_right.itemconfig(index, bg=constants.PRIM_KEY_SELECT_BG_COL, fg="black")
 
     # --- DATEN EINLESEN ---
+    # Nur diese Werte gelten als "leer". Bewusst NICHT die Pandas-Standardliste,
+    # sonst würden z. B. Einträge wie "NA" oder "null" ebenfalls verschwinden.
+    NA_VALUES = ["NULL", ""]
+    # Reihenfolge der Encoding-Versuche (latin-1 kann jede Bytefolge lesen = letzter Fallback).
+    CSV_ENCODINGS = ["utf-8-sig", "cp1252", "latin-1"]
+
+    @classmethod
+    def detect_encoding(cls, filepath: str) -> str:
+        with open(filepath, "rb") as f:
+            raw = f.read()
+        for encoding in cls.CSV_ENCODINGS:
+            try:
+                raw.decode(encoding)
+                return encoding
+            except UnicodeDecodeError:
+                continue
+        return cls.CSV_ENCODINGS[-1]
+
     def read_file(self, filepath: str):
+        """Liest CSV/Excel ein. Alle Werte bleiben Text (dtype=str), damit führende
+        Nullen (PLZ, Telefon, IDs) erhalten bleiben und Schlüssel immer vergleichbar sind."""
         ext = os.path.splitext(filepath)[1].lower()
+        read_opts = dict(dtype=str, keep_default_na=False, na_values=self.NA_VALUES)
         if ext == ".csv":
+            encoding = self.detect_encoding(filepath)
             for sep in [";", ",", "\t"]:
                 try:
-                    df = pd.read_csv(filepath, sep=sep)
+                    df = pd.read_csv(filepath, sep=sep, encoding=encoding, **read_opts)
                     if len(df.columns) > 1: return df
                 except Exception: continue
-            return pd.read_csv(filepath)
+            return pd.read_csv(filepath, encoding=encoding, **read_opts)
         elif ext in [".xlsx", ".xls"]:
-            return pd.read_excel(filepath)
+            return pd.read_excel(filepath, **read_opts)
         raise ValueError("Ungültiges Dateiformat.")
 
     def load_left(self):
@@ -400,6 +422,21 @@ class TableMergerApp:
                 messagebox.showerror("Ladefehler", str(e))
 
     # --- MERGE PROCESS ---
+    # Interne Präfixe, damit beim Merge nie Namenskonflikte (und damit _x/_y-Suffixe) entstehen.
+    LEFT_PREFIX = "__L__"
+    # Maximale Spaltenbreite im Excel-Export (Zeichen); längere Inhalte werden umgebrochen.
+    MAX_EXCEL_COL_WIDTH = 80
+    RIGHT_PREFIX = "__R__"
+
+    @classmethod
+    def export_item_to_internal(cls, item: str, selected_left) -> str:
+        """Übersetzt einen Eintrag der Export-Liste in den internen (präfixierten) Spaltennamen."""
+        if item.endswith(" (Links)"):
+            return cls.LEFT_PREFIX + item[: -len(" (Links)")]
+        if item.endswith(" (Rechts)"):
+            return cls.RIGHT_PREFIX + item[: -len(" (Rechts)")]
+        return (cls.LEFT_PREFIX if item in selected_left else cls.RIGHT_PREFIX) + item
+
     def perform_merge(self):
         if self.df_left is None or self.df_right is None:
             messagebox.showwarning("Fehler", "Bitte beide Tabellen laden!")
@@ -413,7 +450,8 @@ class TableMergerApp:
         sel_left_idx = self.listbox_left.curselection()
         sel_right_idx = self.listbox_right.curselection()
 
-        cols_left = [self.listbox_left.get(i) for i in sel_left_idx]
+        selected_left = [self.listbox_left.get(i) for i in sel_left_idx]
+        cols_left = list(selected_left)
         cols_right = [self.listbox_right.get(i) for i in sel_right_idx]
 
         # Die Schlüssel MÜSSEN für den Merge-Prozess temporär im DF enthalten sein
@@ -422,12 +460,9 @@ class TableMergerApp:
         if self.key_right not in cols_right:
             cols_right.append(self.key_right)
 
-        df_l_filtered = self.df_left[cols_left].copy()
-        df_r_filtered = self.df_right[cols_right].copy()
-
-        # Um Benennungskonflikte zu lösen, falls Spalten in beiden Tabellen gleich heißen,
-        # simulieren wir Pandas Standard-Suffixe (_x und _y) vorab für die Sortierungslogik.
-        # Falls die Spalten ungleich sind, bleiben sie wie sie sind.
+        # Alle Spalten mit Seiten-Präfix versehen -> keine Namenskonflikte beim Merge möglich.
+        df_l_filtered = self.df_left[cols_left].add_prefix(self.LEFT_PREFIX)
+        df_r_filtered = self.df_right[cols_right].add_prefix(self.RIGHT_PREFIX)
         
         save_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
@@ -441,34 +476,19 @@ class TableMergerApp:
                 df_result = pd.merge(
                     df_l_filtered,
                     df_r_filtered,
-                    left_on=self.key_left,
-                    right_on=self.key_right,
+                    left_on=self.LEFT_PREFIX + self.key_left,
+                    right_on=self.RIGHT_PREFIX + self.key_right,
                     how=self.join_type.get()
                 )
 
                 # 2. Gewünschte finale Reihenfolge aus der Drag&Drop-Listbox auslesen
-                final_order_raw = list(self.listbox_export.get(0, tk.END))
-                final_columns_ordered = []
-
-                for item in final_order_raw:
-                    # Rückübersetzung der temporären "(Links)" / "(Rechts)" Anzeigen
-                    if item.endswith(" (Links)"):
-                        clean_name = item.replace(" (Links)", "") + "_x"
-                    elif item.endswith(" (Rechts)"):
-                        clean_name = item.replace(" (Rechts)", "") + "_y"
-                    else:
-                        # Falls Spaltennamen identisch waren, aber nur eine gewählt wurde, 
-                        # vergibt Pandas trotzdem Suffixe. Wir fangen das hier ab:
-                        if item in self.df_left.columns and item in self.df_right.columns:
-                            if item in [self.listbox_left.get(i) for i in sel_left_idx]:
-                                clean_name = item + "_x"
-                            else:
-                                clean_name = item + "_y"
-                        else:
-                            clean_name = item
-                    
-                    if clean_name in df_result.columns:
-                        final_columns_ordered.append(clean_name)
+                #    und interne Namen -> Anzeigenamen (z. B. "Alter (Links)") zuordnen.
+                column_map = {}
+                for item in self.listbox_export.get(0, tk.END):
+                    internal = self.export_item_to_internal(item, selected_left)
+                    if internal in df_result.columns:
+                        column_map[internal] = item
+                final_columns_ordered = list(column_map)
 
                 # Falls der Benutzer gar keine Spalten gewählt hat, brechen wir ab
                 if not final_columns_ordered:
@@ -476,7 +496,7 @@ class TableMergerApp:
                     return
 
                 # DataFrame auf die sortierte Reihenfolge einschränken
-                df_result = df_result[final_columns_ordered]
+                df_result = df_result[final_columns_ordered].rename(columns=column_map)
 
                 # --- NEU: Dialog zum Umbenennen der Spalten aufrufen ---
                 rename_dialog = RenameColumnsDialog(self.root, df_result.columns)
@@ -487,6 +507,16 @@ class TableMergerApp:
                 
                 # DataFrame mit den neuen Namen umbenennen
                 df_result = df_result.rename(columns=rename_dialog.result)
+
+                # Doppelte Spaltennamen nach dem Umbenennen würden den Export zerschießen
+                duplicates = df_result.columns[df_result.columns.duplicated()].unique().tolist()
+                if duplicates:
+                    messagebox.showwarning(
+                        "Doppelte Spaltennamen",
+                        "Folgende Spaltennamen kommen mehrfach vor:\n" + ", ".join(map(str, duplicates))
+                        + "\n\nBitte eindeutige Namen vergeben."
+                    )
+                    return
                 # -------------------------------------------------------
 
                 # 3. Speichern
@@ -506,6 +536,12 @@ class TableMergerApp:
                         'valign': 'top'
                     })
                     
+                    # Lange Texte (z. B. Dokumentation) umbrechen statt die Spalte endlos breit zu machen
+                    wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+
+                    # Werte werden als Text eingelesen (führende Nullen!) -> grüne Excel-Dreiecke unterdrücken
+                    worksheet.ignore_errors({'number_stored_as_text': 'A1:XFD1048576'})
+
                     # Überschriften fett schreiben UND Spaltenbreiten automatisch anpassen
                     for col_num, col_name in enumerate(df_result.columns.values):
                         # 1. Überschrift fett formatieren
@@ -516,8 +552,9 @@ class TableMergerApp:
                         max_len = len(str(col_name))
                         
                         # ...und vergleichen sie mit der Länge des längsten Eintrags in den Daten
-                        if not df_result[col_name].empty:
-                            max_data_len = df_result[col_name].astype(str).str.len().max()
+                        column_data = df_result.iloc[:, col_num].dropna()
+                        if not column_data.empty:
+                            max_data_len = int(column_data.astype(str).str.len().max())
                             max_len = max(max_len, max_data_len)
                         
                         # Ein bisschen Puffer (z. B. + 3 Zeichen) hinzufügen, damit es nicht zu gequetscht wirkt
@@ -526,8 +563,11 @@ class TableMergerApp:
                         # Mindestbreite festlegen (falls der Inhalt sehr kurz ist, z. B. bei IDs)
                         col_width = max(col_width, 10)
                         
-                        # Spaltenbreite im Excel-Sheet setzen
-                        worksheet.set_column(col_num, col_num, col_width)
+                        # Spaltenbreite im Excel-Sheet setzen (gedeckelt, darüber Zeilenumbruch)
+                        if col_width > self.MAX_EXCEL_COL_WIDTH:
+                            worksheet.set_column(col_num, col_num, self.MAX_EXCEL_COL_WIDTH, wrap_format)
+                        else:
+                            worksheet.set_column(col_num, col_num, col_width)
                     
                     # Wichtig: Speichern und Schließen des Writers
                     writer.close()
