@@ -17,6 +17,7 @@ import pandas as pd
 import src.constants as constants
 import src.table_io as table_io
 from src.patient_record import patient_record_export
+from src.lemniscus import lemniscus_export
 
 class RenameColumnsDialog(tk.Toplevel):
     def __init__(self, parent, columns):
@@ -304,11 +305,20 @@ class TableMergerApp:
             self.frame_exports, text="Patientenübersicht (ohne IDs) erstellen …",
             command=self.export_patient_overview, **export_button_style
         )
-        self.btn_patient_overview.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self.btn_patient_overview.pack(side="left", fill="x", expand=True, padx=5)
         Tooltip(self.btn_patient_overview, lambda: (
             "Erstellt aus dem Ordner mit ALLEN CSV-Tabellen einer Instanz eine Excel-Arbeitsmappe OHNE Datenbank-IDs:\n"
             "Patienten (mit Anzahl Termine/Verordnungen/Rechnungen), Dubletten, Termine & Dokumentation.\n"
             "Die laufende Nr. verlinkt die Blätter untereinander."
+        ))
+        self.btn_lemniscus = tk.Button(
+            self.frame_exports, text="Lemniscus Export …",
+            command=self.export_lemniscus, **export_button_style
+        )
+        self.btn_lemniscus.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        Tooltip(self.btn_lemniscus, lambda: (
+            "Überführt den Ordner mit ALLEN CSV-Tabellen einer Instanz in das Lemniscus-Importformat:\n"
+            "Blätter Akten, Notizen, Termine (wie Kundenvorlage) + Zusatzblatt Versicherung."
         ))
         
         Tooltip(self.dropdown_join, self.get_current_tooltip_text)
@@ -543,6 +553,12 @@ class TableMergerApp:
             lambda folder, path: patient_record_export.export_patient_overview(folder, path),
         )
 
+    def export_lemniscus(self):
+        self._export_from_folder(
+            lemniscus_export.PROFILE,
+            lambda folder, path: lemniscus_export.export_lemniscus(folder, path),
+        )
+
     def _export_from_folder(self, profile, export_func):
         """Gemeinsamer Ablauf: Export-Ordner wählen -> Speicherort -> Export -> Ergebnis melden."""
         folder = filedialog.askdirectory(title="Ordner mit dem kompletten CSV-Export wählen")
@@ -586,6 +602,8 @@ class TableMergerApp:
         if result.missing_tables:
             lines.append("\nNicht im Export enthalten (Blätter/Spalten entfallen ggf.):\n"
                          + ", ".join(f"{t}.csv" for t in result.missing_tables))
+        for hint in getattr(result, "hints", []):
+            lines.append(f"\n{hint}")
         messagebox.showinfo(
             f"{profile.title} erstellt",
             f"Gespeichert unter:\n{save_path}\n\n" + "\n".join(lines)
