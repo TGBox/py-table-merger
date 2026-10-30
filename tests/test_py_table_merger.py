@@ -340,6 +340,26 @@ class TestTableMergerApp(unittest.TestCase):
         self.assertTrue(mock_save.call_args.kwargs["initialfile"].startswith("Patientenuebersicht_"))
         self.assertEqual(mock_info.call_args[0][0], "Patientenübersicht erstellt")
 
+    @patch("tkinter.messagebox.showinfo")
+    @patch("tkinter.filedialog.asksaveasfilename", return_value="lemniscus.xlsx")
+    @patch("tkinter.filedialog.askdirectory")
+    def test_lemniscus_button_flow(self, mock_dir, mock_save, mock_info):
+        """Button "Lemniscus Export": eigener Export, Dateiname-Vorschlag, Hinweise in der Meldung."""
+        import tempfile
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "patienten.csv"), "w").close()
+        mock_dir.return_value = folder
+        fake_result = MagicMock(sheet_counts={"Akten": 2}, missing_tables=[],
+                                hints=["3 Termine ohne bekannten Patienten wurden übersprungen."])
+        with patch("table_merger.py_table_merger.lemniscus_export.export_lemniscus",
+                   return_value=fake_result) as mock_export:
+            self.app.export_lemniscus()
+        mock_export.assert_called_once_with(folder, "lemniscus.xlsx")
+        self.assertTrue(mock_save.call_args.kwargs["initialfile"].startswith("Lemniscus_Export_"))
+        title, message = mock_info.call_args[0]
+        self.assertEqual(title, "Lemniscus Export erstellt")
+        self.assertIn("übersprungen", message)
+
     @patch("tkinter.messagebox.showwarning")
     @patch("tkinter.filedialog.asksaveasfilename")
     @patch("tkinter.filedialog.askdirectory")

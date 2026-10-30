@@ -28,6 +28,7 @@ Dieses Tool wurde entwickelt, um **ohne SQL- oder Programmierkenntnisse** und **
 * **Text-sicheres Einlesen:** Alle Werte bleiben Text – führende Nullen (PLZ, Telefon, IDs) gehen nicht verloren. Kodierung (UTF-8 / Windows-1252) wird automatisch erkannt.
 * **Patientenakte:** Über den Button *„Patientenakte erstellen …“* wird aus dem Ordner mit **allen** CSV-Tabellen einer Instanz eine fertige Excel-Arbeitsmappe erzeugt (siehe unten).
 * **Patientenübersicht:** Der Button *„Patientenübersicht (ohne IDs) erstellen …“* erzeugt eine schlanke Arbeitsmappe ganz ohne Datenbank-IDs (siehe unten).
+* **Lemniscus Export:** Der Button *„Lemniscus Export …“* überführt die Daten in das Importformat der Kundenvorlage (siehe unten).
 
 ---
 
@@ -76,6 +77,21 @@ Technisch nutzen beide Exporte dieselbe Pipeline mit zwei Profilen (`PROFILE_REC
 
 ---
 
+## 🔄 Lemniscus Export
+
+Überführt den Ordner mit allen CSV-Tabellen in das Importformat der Kundenvorlage (`tests/fixtures/lemniscus/akten-vorlage.xlsx`): Blätter, Spalten, Reihenfolge, Kopf-Formatierung, Spaltenbreiten und Zelltypen (Wahrheitswerte, `dd.mm.yyyy`, `dd.mm.yyyy hh:mm`, Text) wie in der Vorlage. Blau hinterlegte Kopfzellen der Vorlage gelten als Pflichtfelder; leere Pflichtfelder werden nach dem Export gemeldet.
+
+| Blatt | Quelle | Zuordnung |
+|---|---|---|
+| Akten | `patienten`, `rezepte` | Nummer = laufende Nr. (alphabetisch), Geschlecht aus Anrede (Herr → m, Frau → w), Straße + Hausnummer, Land `DE`, Telefon im Format `+49…`, Diagnose = neueste Verordnung (Diagnosetext, sonst ICD-10), Aktiv/Status = aktiv, Rechnung-Spalten aus dem abweichenden Rechnungsempfänger (Freitext oder JSON) |
+| Notizen | `events`, `history`, `anatomy_patienten`, `rezepte`, `kartei_*` | Termindokumentation (Zeitpunkt = Terminbeginn), Notizen, Befunde (Körperschema), Therapieberichte, Fragebögen („Frage: Antwort“) |
+| Termine | `events`, `resources`, `rezepte_events`, `rezepte` | Bezeichnung, Beginn, Dauer, Diagnose der zugeordneten Verordnung, Raum = 1, Wahrgenommen, Fertig bearbeitet = abgerechnet, Anmerkungen (Abgesagt/Nicht erschienen/Hausbesuch, Therapeut, Verordnung + Termin der Serie, Bemerkung) |
+| Versicherung *(Zusatzblatt)* | `patienten` | Krankenkasse, IK, Versichertennummer, -status, privat, zuzahlungsbefreit (bis) |
+
+Nicht übernommen: Termine ohne Patient (z. B. „Flexzeit“), Termine gelöschter Patienten (werden gezählt und gemeldet), Dokumente/Dateien, Rechnungen. Leer bleiben mangels Quelle: Titel, Beruf, Firma, Fax, LKF.
+
+---
+
 ## 🛠️ Projektstruktur
 
 Das Projekt ist modular nach modernen Python-Standards aufgebaut:
@@ -87,10 +103,14 @@ py_table_merger/
 │   ├── table_io.py             # Einlesen (CSV/Excel) und formatierter Excel-Export
 │   ├── patient_record/
 │   │   └── patient_record_export.py  # Exporte "Patientenakte" und "Patientenübersicht"
+│   ├── lemniscus/
+│   │   └── lemniscus_export.py       # Export "Lemniscus" (Importformat der Kundenvorlage)
 │   └── table_merger/
 │       ├── __init__.py
 │       └── py_table_merger.py  # Hauptanwendung (GUI & Logik)
 ├── tests/
 │   ├── test_py_table_merger.py      # Tests Merger-GUI & Merge-Logik
-│   └── test_patient_record_export.py # Tests Patientenakte
+│   ├── test_patient_record_export.py # Tests Patientenakte & -übersicht
+│   ├── test_lemniscus_export.py      # Tests Lemniscus-Export
+│   └── fixtures/lemniscus/           # Kundenvorlage (nur Kopfzeilen)
 └── README.md                   # Projektdokumentation
